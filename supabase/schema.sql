@@ -74,6 +74,13 @@ create table if not exists public.votes (
   foreign key (target, day) references public.contests(target, day) on delete cascade
 );
 
+-- Fil : messages épinglés par l'organisateur, et date de modification d'un message.
+alter table public.posts add column if not exists pinned boolean not null default false;
+alter table public.posts add column if not exists edited_at timestamptz;
+-- Discussion façon messagerie : un message peut répondre à un autre (citation).
+alter table public.posts add column if not exists reply_to uuid references public.posts(id) on delete set null;
+create index if not exists posts_reply_idx on public.posts (reply_to);
+
 -- Membres retirés du défi par l'organisateur. Leur historique est conservé.
 create table if not exists public.banned (
   user_id    uuid primary key references public.profiles(id) on delete cascade,
@@ -165,6 +172,24 @@ create trigger comments_stamp before insert on public.comments
 drop trigger if exists banned_stamp on public.banned;
 create trigger banned_stamp before insert on public.banned
   for each row execute function public.stamp_created();
+
+-- Modification d'un message : l'auteur ne change que le texte de ses messages, l'organisateur
+-- ne change que l'épinglage. Tout le reste est figé. (Ignoré depuis l'éditeur SQL.)
+create or replace function public.posts_guard() returns trigger
+language plpgsql set search_path = public as $$
+begin
+  if auth.uid() is null then return new; end if;
+  if not public.is_admin() then new.pinned := old.pinned; end if;
+  if not (old.author = auth.uid() and old.kind = 'text') then new.text := old.text; end if;
+  new.id := old.id; new.author := old.author; new.kind := old.kind; new.day := old.day;
+  new.target := old.target; new.late := old.late; new.created_at := old.created_at; new.reply_to := old.reply_to;
+  new.edited_at := case when new.text is distinct from old.text then now() else old.edited_at end;
+  return new;
+end $$;
+
+drop trigger if exists posts_guard on public.posts;
+create trigger posts_guard before update on public.posts
+  for each row execute function public.posts_guard();
 
 -- L'heure et le badge "après 23 h" sont fixés par le serveur, jamais par le téléphone.
 create or replace function public.checkins_stamp() returns trigger
@@ -320,11 +345,15 @@ create policy checkins_delete on public.checkins for delete to authenticated usi
 drop policy if exists posts_read   on public.posts;
 drop policy if exists posts_insert on public.posts;
 drop policy if exists posts_delete on public.posts;
+drop policy if exists posts_update on public.posts;
 create policy posts_read   on public.posts for select to authenticated using ((select public.is_member()));
 create policy posts_insert on public.posts for insert to authenticated
   with check (author = (select auth.uid()) and (select public.is_member()) and kind = 'text'
               and text is not null and char_length(trim(text)) > 0
               and day is null and target is null and late = false);
+create policy posts_update on public.posts for update to authenticated
+  using ((author = (select auth.uid()) and kind = 'text' and (select public.is_member())) or (select public.is_admin()))
+  with check (kind <> 'text' or char_length(trim(text)) > 0);
 create policy posts_delete on public.posts for delete to authenticated
   using ((author = (select auth.uid()) and kind = 'text') or (select public.is_admin()));
 
@@ -404,3 +433,18 @@ begin
     end;
   end loop;
 end $$;
+
+-- ---------- Anciens commentaires -> réponses dans la discussion -------
+-- Chaque commentaire devient un message qui cite le message commenté (même
+-- identifiant, même date), puis quitte la table comments. Sans effet ensuite.
+alter table public.posts disable trigger posts_stamp;
+with moved as (
+  insert into public.posts (id, author, kind, text, reply_to, created_at)
+  select c.id, c.author, 'text', left(c.text, 500), c.post_id, c.created_at
+  from public.comments c
+  where char_length(trim(c.text)) > 0
+  on conflict (id) do nothing
+  returning id
+)
+delete from public.comments c where c.id in (select id from moved) or char_length(trim(c.text)) = 0;
+alter table public.posts enable trigger posts_stamp;

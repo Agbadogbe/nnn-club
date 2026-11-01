@@ -15,10 +15,13 @@ let banned = new Set();              // membres retirés par l'organisateur (his
 let recovery = false;                // ouverture depuis le lien « mot de passe oublié »
 let checkins = new Map();            // id -> {day: {status, late}}
 let contests = new Map();            // "uid_day" -> {target, day, resolution, opened_by, votes:{voter:vote}}
-let posts = [], reactions = new Map(), comments = [];
-const openComments = new Set(), drafts = {};
+let posts = [], reactions = new Map(), quoted = new Map(); // quoted : messages plus anciens cités par une réponse
+const drafts = {};
 let busy = false, oathOk = false, confessOpen = false, freshStamp = false;
-let tab = 'today', lastSeenPost = 0;
+let tab = 'today', lastSeenPost = +(saved('nnn-seen') || 0);
+let feedFilter = saved('nnn-filter') || 'all', postLimit = 100, morePosts = false, editing = null;
+let selected = null, reveal = false, replyTo = null, unreadMark = null, atBottomTs = 0, stick = null, keepFrom = null, pinIdx = 0;
+const openGroups = new Set(), showWho = new Set();
 let authMode = 'login';
 
 /* ---------- utilitaires ---------- */
@@ -156,6 +159,7 @@ function render() {
   if (!authed) renderPoster();
   if (hasProfile) { renderToday(); renderBoard(); renderFeed(); }
   renderRemind(hasProfile);
+  document.body.classList.toggle('chat-on', hasProfile && tab === 'feed');
   if (aeId) { const n = $(aeId); if (n && n !== document.activeElement) { n.focus(); if (sel) try { n.setSelectionRange(...sel); } catch (_) {} } }
 }
 // Rappel avant minuit : à partir de 18 h (heure de Paris), tant que le jour n'est pas validé.
@@ -295,42 +299,263 @@ function renderBoard() {
   g.append(h('thead', {}, head), tb);
 }
 
+/* ---------- la discussion du groupe (façon messagerie) ---------- */
+const FILTERS = [['all', 'Tout'], ['text', 'Messages'], ['ok', 'Validations'], ['contest', 'Contestations'], ['me', '@ Moi']];
+const reEsc = x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const hm = new Intl.DateTimeFormat('fr-FR', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+const dayKey = new Intl.DateTimeFormat('fr-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+const dayLong = new Intl.DateTimeFormat('fr-FR', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long' });
+function dayLabel(ts) {
+  const k = dayKey.format(new Date(ts)), today = dayKey.format(new Date()), y = dayKey.format(new Date(Date.now() - 864e5));
+  if (k === today) return 'Aujourd\'hui'; if (k === y) return 'Hier';
+  const s = dayLong.format(new Date(ts)); return s[0].toUpperCase() + s.slice(1);
+}
+// Découpe un texte en morceaux, en repérant les @pseudo des membres (le plus long d'abord).
+function richText(text) {
+  const names = [...profiles.values()].map(x => x.pseudo).sort((a, b) => b.length - a.length);
+  if (!names.length || !text.includes('@')) return [text];
+  const re = new RegExp('@(' + names.map(reEsc).join('|') + ')(?![\\p{L}\\p{N}_])', 'giu');
+  const out = []; let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const mine = m[1].toLowerCase() === nm(me).toLowerCase();
+    out.push(h('span', { class: 'mention' + (mine ? ' me' : ''), text: m[0] }));
+    last = re.lastIndex;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+function mentionsMe(text) {
+  if (!text || !profiles.has(me)) return false;
+  return new RegExp('@' + reEsc(nm(me)) + '(?![\\p{L}\\p{N}_])', 'iu').test(text);
+}
+function postById(id) { return posts.find(p => p.id === id) || quoted.get(id) || null; }
+function repliesToMe(p) { const o = p.reply_to && postById(p.reply_to); return !!o && o.author === me && p.author !== me; }
+function concernsMe(p) { return mentionsMe(p.text) || (p.kind === 'contest' && p.target === me) || repliesToMe(p); }
+// Texte court d'un message, pour les citations et la barre d'épinglage.
+function snippet(p) {
+  if (!p) return 'Message supprimé';
+  if (p.kind === 'text') return p.text.length > 120 ? p.text.slice(0, 118) + '…' : p.text;
+  return { ok: 'tient le jour ' + p.day, fail: 'avoue au jour ' + p.day, join: 'entre sur le mur', contest: 'conteste le jour ' + p.day + ' de ' + nm(p.target) }[p.kind] || '';
+}
+function setFilter(f) { feedFilter = f; try { localStorage.setItem('nnn-filter', f); } catch (_) {} stick = 'bottom'; queue(); }
+function markSeen() {
+  const newest = Math.max(0, ...posts.map(p => +new Date(p.created_at)));
+  if (newest > lastSeenPost) { lastSeenPost = newest; try { localStorage.setItem('nnn-seen', String(newest)); } catch (_) {} }
+}
+function feedBadge() {
+  const fresh = x => +new Date(x.created_at) > lastSeenPost && x.author !== me;
+  const newPost = posts.some(fresh), atMe = posts.some(p => fresh(p) && concernsMe(p));
+  const dot = $('feed-dot');
+  dot.hidden = tab === 'feed' || !(newPost || atMe);
+  dot.className = 'dot' + (atMe ? ' at' : '');
+  dot.textContent = atMe ? '@' : '';
+}
+const nearBottom = () => window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 140;
+function toBottom() { window.scrollTo(0, document.documentElement.scrollHeight); }
+function jumpTo(id) {
+  const el = document.querySelector(`#feed [data-id="${CSS.escape(id)}"]`);
+  if (!el) { toast('Ce message est trop ancien pour être affiché.'); return; }
+  el.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+}
+function select(id) { selected = selected === id ? null : id; reveal = !!selected; queue(); }
+function startReply(p) {
+  replyTo = p.id; selected = null; queue();
+  const c = $('composer'); c.focus();
+}
+
 function renderFeed() {
-  const f = $('feed'); f.replaceChildren();
-  if (tab === 'feed' && posts[0]) lastSeenPost = Math.max(lastSeenPost, +new Date(posts[0].created_at));
-  $('feed-dot').hidden = tab === 'feed' || !posts[0] || +new Date(posts[0].created_at) <= lastSeenPost || posts[0].author === me;
-  if (!posts.length) { f.append(h('div', { class: 'empty', text: loaded ? 'Le fil est vide. Lance la discussion ou trace ton premier bâton pour l\'annoncer.' : 'Chargement du fil…' })); return; }
-  const byPost = {}; comments.forEach(c => (byPost[c.post_id] ||= []).push(c));
-  for (const p of posts) {
-    const sys = p.kind !== 'text', isC = p.kind === 'contest';
-    let line = null;
-    if (p.kind === 'ok') line = [h('b', { text: nm(p.author) }), h('span', { class: 'big ok', text: 'tient le jour ' + p.day }), p.late ? h('span', { class: 'badge gold', text: 'après 23 h' }) : null];
-    if (p.kind === 'fail') line = [h('b', { text: nm(p.author) }), h('span', { class: 'big bad', text: 'avoue au jour ' + p.day }), h('span', { class: 'badge ice', text: 'Honnête' })];
-    if (p.kind === 'join') line = [h('b', { text: nm(p.author) }), h('span', { class: 'big ice', text: 'entre sur le mur' })];
-    if (isC) line = [h('b', { text: nm(p.author) }), h('span', { class: 'big gold', text: 'conteste' }), 'le jour ' + p.day + ' de', h('b', { text: nm(p.target) })];
-    const card = h('article', { class: 'post' + (sys && !isC ? ' sys' : '') + (isC ? ' contest' : '') },
-      h('div', { class: 'p-head' }, avatar(p.author), h('div', { class: 'who' }, sys ? h('div', { class: 'sysline' }, line) : h('b', { text: nm(p.author) }), h('div', { class: 'when', text: when(p.created_at) }))));
-    if (p.kind === 'text') card.append(h('p', { class: 'p-text', text: p.text }));
-    if (isC) card.append(voteBox(contests.get(p.target + '_' + p.day)));
-    const rx = reactions.get(p.id) || {}, counts = {}; Object.values(rx).forEach(e => counts[e] = (counts[e] || 0) + 1);
-    card.append(h('div', { class: 'reacts' }, EMOJIS.map(e => h('button', { class: 'react', 'aria-pressed': rx[me] === e ? 'true' : 'false', 'aria-label': 'Réagir ' + e, onclick: () => react(p.id, e) }, e, counts[e] ? h('small', { text: counts[e] }) : null))));
-    const cs = (byPost[p.id] || []).slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-    const open = openComments.has(p.id);
-    const acts = h('div', { class: 'actions' }, h('button', { onclick: () => { open ? openComments.delete(p.id) : openComments.add(p.id); queue(); }, text: cs.length ? `${cs.length} commentaire${cs.length > 1 ? 's' : ''}` : 'Commenter' }));
-    const okNow = p.kind === 'ok' && checkins.get(p.author)?.[p.day]?.status === 'ok';
-    if (okNow && votesOpen() && p.author !== me && !banned.has(p.author) && !contests.has(p.author + '_' + p.day)) acts.append(h('button', { class: 'warn', onclick: () => contest(p), text: 'Contester' }));
-    if ((p.kind === 'text' && p.author === me) || admin) acts.append(h('button', { class: 'del', onclick: () => delPost(p.id), text: 'Supprimer' }));
-    card.append(acts);
-    if (open) {
-      const box = h('div', { class: 'comments' });
-      cs.forEach(c => box.append(h('div', { class: 'cmt' }, avatar(c.author, 'sm'), h('div', {}, h('b', { text: nm(c.author) }), c.text,
-        (c.author === me || admin) ? h('button', { class: 'linkbtn', style: 'margin-left:8px', onclick: () => { if (confirm('Supprimer ce commentaire ?')) run(() => sb.from('comments').delete().eq('id', c.id)); }, text: 'suppr.' }) : null))));
-      const inp = h('input', { type: 'text', id: 'c-' + p.id, maxlength: '300', placeholder: 'Ton commentaire…', 'aria-label': 'Commentaire' });
-      inp.value = drafts[p.id] || ''; inp.addEventListener('input', () => drafts[p.id] = inp.value);
-      box.append(h('form', { class: 'cform', onsubmit: e => { e.preventDefault(); addComment(p.id, inp); } }, inp, h('button', { class: 'btn', type: 'submit', text: 'Envoyer' })));
-      card.append(box);
+  const f = $('feed');
+  const wasBottom = tab === 'feed' && nearBottom();
+  f.replaceChildren();
+  const seenBefore = unreadMark ?? lastSeenPost;
+  if (tab === 'feed' && loaded) { if (unreadMark == null) { unreadMark = atBottomTs = lastSeenPost; stick ||= 'unread'; } markSeen(); }
+  feedBadge();
+  $('feed-filters').replaceChildren(...FILTERS.map(([k, label]) => h('button', { type: 'button', class: 'chip', 'aria-pressed': feedFilter === k ? 'true' : 'false', onclick: () => setFilter(k), text: label })));
+
+  // Barre d'épinglage : le dernier message épinglé, un appui l'affiche (et passe au suivant).
+  const pins = posts.filter(p => p.pinned).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const pb = $('pinbar'); pb.hidden = !pins.length;
+  if (pins.length) {
+    const p = pins[pinIdx % pins.length];
+    pb.replaceChildren(h('span', { class: 'pin-ic', 'aria-hidden': 'true', text: '📌' }),
+      h('span', { class: 'pin-tx' }, h('b', { text: 'Épinglé' + (pins.length > 1 ? ` ${pinIdx % pins.length + 1}/${pins.length}` : '') }), h('span', { text: nm(p.author) + ' : ' + snippet(p) })));
+    pb.onclick = () => { const id = pins[pinIdx % pins.length].id; pinIdx++; if (feedFilter !== 'all' && feedFilter !== 'text') feedFilter = 'all'; render(); jumpTo(id); };
+  }
+
+  // Composer : réponse en cours
+  const rb = $('replybar'), rp = replyTo && postById(replyTo);
+  if (replyTo && !rp) replyTo = null;
+  rb.hidden = !rp;
+  if (rp) rb.replaceChildren(h('div', { class: 'quote', style: '--h:' + hue(rp.author) }, h('b', { text: 'Réponse à ' + (rp.author === me ? 'toi-même' : nm(rp.author)) }), h('span', { text: snippet(rp) })),
+    h('button', { type: 'button', class: 'x', 'aria-label': 'Annuler la réponse', onclick: () => { replyTo = null; queue(); }, text: '✕' }));
+
+  if (!posts.length) { f.append(h('div', { class: 'empty', text: loaded ? 'La discussion est vide. Écris le premier message ou trace ton premier bâton pour l\'annoncer.' : 'Chargement de la discussion…' })); return; }
+
+  const keep = p => feedFilter === 'all' || (feedFilter === 'text' && p.kind === 'text') || (feedFilter === 'ok' && (p.kind === 'ok' || p.kind === 'fail'))
+    || (feedFilter === 'contest' && p.kind === 'contest') || (feedFilter === 'me' && concernsMe(p));
+  const list = posts.filter(keep).slice().reverse(); // du plus ancien au plus récent
+
+  // Vue « Tout » : les validations d'un même jour forment une seule pastille, placée à la dernière.
+  const items = [];
+  if (feedFilter === 'all') {
+    const byDay = {}; list.forEach(p => { if (p.kind === 'ok') (byDay[p.day] ||= []).push(p); });
+    for (const p of list) {
+      const g = p.kind === 'ok' && byDay[p.day];
+      if (g && g.length > 1) { if (g[g.length - 1] === p) items.push({ group: g, day: p.day, at: p.created_at }); }
+      else items.push({ post: p, at: p.created_at });
     }
-    f.append(card);
+  } else list.forEach(p => items.push({ post: p, at: p.created_at }));
+
+  if (morePosts) f.append(h('button', { class: 'older', type: 'button', onclick: () => { postLimit += 100; keepFrom = document.documentElement.scrollHeight - window.scrollY; loadAll(); }, text: 'Voir les messages plus anciens' }));
+  if (!items.length) f.append(h('div', { class: 'empty', text: feedFilter === 'me' ? 'Rien pour toi pour l\'instant : ici s\'affichent les messages qui te mentionnent ou te répondent.' : 'Rien à afficher avec ce filtre.' }));
+  let lastDay = null, prev = null, unreadShown = false;
+  for (const it of items) {
+    const dk = dayKey.format(new Date(it.at));
+    if (dk !== lastDay) { f.append(h('div', { class: 'daysep' }, h('span', { text: dayLabel(it.at) }))); lastDay = dk; prev = null; }
+    const p = it.post;
+    if (!unreadShown && seenBefore && +new Date(it.at) > seenBefore && (it.group ? it.group.some(x => x.author !== me) : p.author !== me)) {
+      f.append(h('div', { class: 'unread', id: 'unread' }, h('span', { text: 'Nouveaux messages' }))); unreadShown = true; prev = null;
+    }
+    if (it.group) { f.append(groupPill(it.group, it.day)); prev = null; continue; }
+    if (p.kind === 'text') {
+      const cont = prev && prev.kind === 'text' && prev.author === p.author && new Date(p.created_at) - new Date(prev.created_at) < 5 * 60e3;
+      f.append(bubble(p, cont)); prev = p;
+    } else { f.append(p.kind === 'contest' ? contestCard(p) : sysPill(p)); prev = null; }
+  }
+
+  if (tab !== 'feed') return;
+  if (keepFrom != null) { window.scrollTo(0, document.documentElement.scrollHeight - keepFrom); keepFrom = null; }
+  else if (stick) { const u = stick === 'unread' && $('unread'); stick = null; u ? u.scrollIntoView({ block: 'start' }) : toBottom(); }
+  else if (wasBottom) toBottom();
+  if (reveal) { reveal = false; f.querySelector('.sel .msg-actions')?.scrollIntoView({ block: 'nearest' }); }
+  updateToBottom();
+}
+// Bouton « derniers messages » quand on remonte, avec le nombre de messages reçus depuis.
+function updateToBottom() {
+  const b = $('tobottom'), atB = nearBottom();
+  if (atB) atBottomTs = Math.max(atBottomTs, ...posts.map(p => +new Date(p.created_at)));
+  b.hidden = tab !== 'feed' || atB;
+  const n = posts.filter(p => +new Date(p.created_at) > atBottomTs && p.author !== me).length;
+  $('tobottom-n').hidden = !n; $('tobottom-n').textContent = n > 99 ? '99+' : n;
+}
+
+function canContest(p) {
+  return p.kind === 'ok' && checkins.get(p.author)?.[p.day]?.status === 'ok' && votesOpen() && p.author !== me
+    && !banned.has(p.author) && !contests.has(p.author + '_' + p.day);
+}
+// Réactions affichées sous un message ; un appui montre qui a réagi.
+function rxBar(p) {
+  const rx = reactions.get(p.id) || {}, counts = {}; Object.values(rx).forEach(e => counts[e] = (counts[e] || 0) + 1);
+  const n = Object.keys(rx).length; if (!n) return null;
+  const open = showWho.has(p.id);
+  const box = h('div', { class: 'rxwrap' }, h('button', { type: 'button', class: 'rxsum' + (rx[me] ? ' mine' : ''), 'aria-expanded': open ? 'true' : 'false', 'aria-label': 'Voir qui a réagi',
+    onclick: e => { e.stopPropagation(); open ? showWho.delete(p.id) : showWho.add(p.id); queue(); } },
+    EMOJIS.filter(e => counts[e]).join(''), n > 1 ? h('small', { text: n }) : null));
+  if (open) box.append(h('div', { class: 'whorx' }, EMOJIS.filter(e => counts[e]).map(e => h('div', {}, e + ' ', Object.entries(rx).filter(([, x]) => x === e).map(([u]) => u === me ? 'Toi' : nm(u)).join(', ')))));
+  return box;
+}
+// Barre d'actions d'un message sélectionné : réactions rapides puis actions.
+function actionBar(p) {
+  const rx = reactions.get(p.id) || {}, mine = p.kind === 'text' && p.author === me;
+  const bar = h('div', { class: 'msg-actions', onclick: e => e.stopPropagation() },
+    h('div', { class: 'quick' }, EMOJIS.map(e => h('button', { type: 'button', class: 'react', 'aria-pressed': rx[me] === e ? 'true' : 'false', 'aria-label': 'Réagir ' + e, onclick: () => { selected = null; react(p.id, e); } }, e))),
+    h('div', { class: 'actions' },
+      h('button', { type: 'button', onclick: () => startReply(p), text: 'Répondre' }),
+      p.kind === 'text' ? h('button', { type: 'button', onclick: () => copyText(p.text), text: 'Copier' }) : null,
+      mine && editing !== p.id ? h('button', { type: 'button', onclick: () => { editing = p.id; selected = null; queue(); }, text: 'Modifier' }) : null,
+      admin && p.kind === 'text' ? h('button', { type: 'button', onclick: () => { selected = null; pinPost(p); }, text: p.pinned ? 'Désépingler' : 'Épingler' }) : null,
+      canContest(p) ? h('button', { class: 'warn', type: 'button', onclick: () => { selected = null; contest(p); }, text: 'Contester' }) : null,
+      mine || admin ? h('button', { class: 'del', type: 'button', onclick: () => { selected = null; delPost(p.id); }, text: 'Supprimer' }) : null));
+  return bar;
+}
+function copyText(t) { selected = null; queue(); (navigator.clipboard?.writeText(t) || Promise.reject()).then(() => toast('Message copié'), () => toast('Copie impossible sur cet appareil')); }
+function quoteBox(p) {
+  if (!p.reply_to) return null;
+  const o = postById(p.reply_to);
+  return h('button', { type: 'button', class: 'quote', style: o ? '--h:' + hue(o.author) : null, onclick: e => { e.stopPropagation(); if (o) jumpTo(o.id); } },
+    h('b', { text: o ? (o.author === me ? 'Toi' : nm(o.author)) : '' }), h('span', { text: snippet(o) }));
+}
+
+function bubble(p, cont) {
+  const mine = p.author === me, sel = selected === p.id, atMe = !mine && (mentionsMe(p.text) || repliesToMe(p));
+  const b = h('div', { class: 'bubble', role: 'button', tabindex: '0', 'aria-label': 'Message de ' + nm(p.author) + ', options',
+    onclick: e => { if (e.target.closest('textarea,.btn,a,.mention')) return; select(p.id); }, onkeydown: e => { if ((e.key === 'Enter' || e.key === ' ') && e.target === b) { e.preventDefault(); select(p.id); } } });
+  if (!mine && !cont) b.append(h('b', { class: 'author', style: '--h:' + hue(p.author), text: nm(p.author) }));
+  const q = quoteBox(p); if (q) b.append(q);
+  if (editing === p.id) {
+    const ta = h('textarea', { id: 'e-' + p.id, rows: '3', maxlength: '500', 'aria-label': 'Modifier le message' }); ta.value = drafts['e-' + p.id] ?? p.text;
+    ta.addEventListener('input', () => drafts['e-' + p.id] = ta.value);
+    b.append(h('div', { class: 'stack-s edit' }, ta, h('div', { class: 'btn-row' },
+      h('button', { class: 'btn', type: 'button', onclick: () => saveEdit(p, ta.value), text: 'Enregistrer' }),
+      h('button', { class: 'btn ghost', type: 'button', onclick: () => { editing = null; delete drafts['e-' + p.id]; queue(); }, text: 'Annuler' }))));
+  } else b.append(h('p', { class: 'p-text' }, richText(p.text), h('span', { class: 'meta', text: (p.pinned ? '📌 ' : '') + (p.edited_at ? 'modifié · ' : '') + hm.format(new Date(p.created_at)) })));
+  return h('div', { class: 'msg' + (mine ? ' mine' : '') + (cont ? ' cont' : '') + (atMe ? ' atme' : '') + (sel ? ' sel' : ''), 'data-id': p.id },
+    !mine ? (cont ? h('span', { class: 'avspace' }) : avatar(p.author, 'sm')) : null,
+    h('div', { class: 'mcol' }, b, rxBar(p), sel ? actionBar(p) : null));
+}
+function sysPill(p) {
+  const sel = selected === p.id;
+  const line = { ok: ['✅ ', h('b', { text: nm(p.author) }), ' tient le jour ' + p.day], fail: ['🧊 ', h('b', { text: nm(p.author) }), ' avoue au jour ' + p.day + ' · honnête'], join: ['👋 ', h('b', { text: nm(p.author) }), ' entre sur le mur'] }[p.kind] || [snippet(p)];
+  return h('div', { class: 'sysmsg' + (sel ? ' sel' : ''), 'data-id': p.id },
+    h('button', { type: 'button', class: 'pill ' + p.kind, onclick: () => select(p.id) }, line, p.late ? h('span', { class: 'badge gold', text: 'après 23 h' }) : null, h('span', { class: 'meta', text: hm.format(new Date(p.created_at)) })),
+    rxBar(p), sel ? actionBar(p) : null);
+}
+function groupPill(group, day) {
+  const open = openGroups.has(day), n = group.length, late = group.filter(p => p.late).length;
+  const names = group.map(p => p.author === me ? 'Toi' : nm(p.author));
+  const who = n <= 3 ? names.slice(0, -1).join(', ') + ' et ' + names[n - 1] : names.slice(0, 2).join(', ') + ` et ${n - 2} autres`;
+  const box = h('div', { class: 'sysmsg group', 'data-id': 'g' + day },
+    h('button', { type: 'button', class: 'pill ok', 'aria-expanded': open ? 'true' : 'false', onclick: () => { open ? openGroups.delete(day) : openGroups.add(day); queue(); } },
+      h('span', { class: 'stackav' }, group.slice(0, 3).map(p => avatar(p.author, 'xs'))), '✅ ', h('b', { text: who }), ` tiennent le jour ${day}`,
+      late ? h('span', { class: 'badge gold', text: `${late} après 23 h` }) : null, h('span', { class: 'meta', text: hm.format(new Date(group[n - 1].created_at)) })));
+  if (open) box.append(h('div', { class: 'glist' }, group.map(p => h('div', { class: 'grow', 'data-id': p.id }, avatar(p.author, 'sm'),
+    h('div', { class: 'gname' }, h('b', { text: nm(p.author) }), ' ', h('span', { class: 'when', text: hm.format(new Date(p.created_at)) }), p.late ? h('span', { class: 'badge gold', text: 'après 23 h' }) : null),
+    canContest(p) ? h('button', { class: 'linkbtn warn', type: 'button', onclick: () => contest(p), text: 'Contester' }) : null))));
+  return box;
+}
+function contestCard(p) {
+  const sel = selected === p.id;
+  return h('div', { class: 'sysmsg' + (sel ? ' sel' : ''), 'data-id': p.id },
+    h('article', { class: 'contest-card' },
+      h('button', { type: 'button', class: 'c-head', onclick: () => select(p.id) }, '⚖️ ', h('b', { text: nm(p.author) }), ' conteste le jour ' + p.day + ' de ', h('b', { text: p.target === me ? 'toi' : nm(p.target) }), h('span', { class: 'meta', text: hm.format(new Date(p.created_at)) })),
+      voteBox(contests.get(p.target + '_' + p.day))),
+    rxBar(p), sel ? actionBar(p) : null);
+}
+
+/* ---------- saisie : réponse, mentions, envoi ---------- */
+function mentionQuery() {
+  const c = $('composer'), upto = c.value.slice(0, c.selectionStart), m = /(^|\s)@([^@\n]{0,24})$/u.exec(upto);
+  return m ? { q: m[2], start: upto.length - m[2].length - 1 } : null;
+}
+function renderMentions() {
+  const box = $('mention-list'), mq = mentionQuery();
+  const cands = mq ? members().filter(id => id !== me && nm(id).toLowerCase().startsWith(mq.q.toLowerCase())).slice(0, 5) : [];
+  box.hidden = !cands.length;
+  box.replaceChildren(...cands.map(id => h('button', { type: 'button', role: 'option', onmousedown: e => e.preventDefault(), onclick: () => insertMention(nm(id)) }, avatar(id, 'xs'), '@' + nm(id))));
+}
+function insertMention(n) {
+  const c = $('composer'), mq = mentionQuery(); if (!mq) return;
+  const before = c.value.slice(0, mq.start), after = c.value.slice(c.selectionStart);
+  c.value = before + '@' + n + ' ' + after; const pos = (before + '@' + n + ' ').length;
+  c.focus(); c.setSelectionRange(pos, pos); composerChanged();
+}
+function composerChanged() {
+  const c = $('composer');
+  c.style.height = ''; if (c.offsetParent && c.value) c.style.height = Math.min(c.scrollHeight + 2, 150) + 'px';
+  const n = c.value.length; $('ccount').hidden = n < 400; $('ccount').textContent = n + '/500';
+  $('post-btn').disabled = !c.value.trim();
+  try { localStorage.setItem('nnn-draft', c.value); } catch (_) {}
+  renderMentions();
+}
+async function sendMessage() {
+  const c = $('composer'), t = c.value.trim(); if (!t || busy) return;
+  const row = { author: me, kind: 'text', text: t.slice(0, 500) };
+  if (replyTo && postById(replyTo)) row.reply_to = replyTo;
+  if (await run(() => sb.from('posts').insert(row))) {
+    c.value = ''; replyTo = null; stick = 'bottom'; composerChanged(); try { localStorage.removeItem('nnn-draft'); } catch (_) {}
+    if (navigator.vibrate) try { navigator.vibrate(15); } catch (_) {}
   }
 }
 
@@ -351,7 +576,7 @@ function voteBox(c) {
       h('button', { class: 'btn ghost' + (mv === 'valid' ? ' sel' : ''), onclick: () => vote(c, 'valid'), text: 'Je le crois' }),
       h('button', { class: 'btn ghost' + (mv === 'invalid' ? ' sel' : ''), onclick: () => vote(c, 'invalid'), text: 'Je doute' })));
   }
-  if (me === c.target && !c.resolution) box.append(h('span', { class: 'dim', style: 'font-size:13px', text: 'Tu ne votes pas sur ton propre jour. Défends-toi en commentaire.' }));
+  if (me === c.target && !c.resolution) box.append(h('span', { class: 'dim', style: 'font-size:13px', text: 'Tu ne votes pas sur ton propre jour. Défends-toi en répondant dans la discussion.' }));
   if (admin && me !== c.target) box.append(h('div', { class: 'btn-row' },
     h('button', { class: 'btn ghost', onclick: () => resolve(c, 'valid'), text: 'Maintenir' }),
     h('button', { class: 'btn ghost', onclick: () => resolve(c, 'invalid'), text: 'Annuler le jour' }),
@@ -362,24 +587,36 @@ function voteBox(c) {
 /* ---------- données ---------- */
 async function loadAll() {
   if (!sb || !session) return;
-  const [p, c, po, r, cm, ct, v, bn] = await Promise.all([
+  const [p, c, po, pin, ct, v, bn] = await Promise.all([
     sb.from('profiles').select('id,pseudo,created_at'),
     sb.from('checkins').select('user_id,day,status,late'),
-    sb.from('posts').select('*').order('created_at', { ascending: false }).limit(150),
-    sb.from('reactions').select('post_id,user_id,emoji'),
-    sb.from('comments').select('*').order('created_at', { ascending: false }).limit(500),
+    sb.from('posts').select('*').order('created_at', { ascending: false }).limit(postLimit + 1),
+    sb.from('posts').select('*').eq('pinned', true),
     sb.from('contests').select('*'),
     sb.from('votes').select('*'),
     sb.from('banned').select('user_id'),
   ]);
-  const errs = [p, c, po, r, cm, ct, v, bn].map(x => x.error).filter(Boolean);
+  // Réactions et commentaires des seuls messages chargés.
+  const recent = po.data || [];
+  morePosts = recent.length > postLimit;
+  const loadedPosts = recent.slice(0, postLimit);
+  (pin.data || []).forEach(x => { if (!loadedPosts.some(y => y.id === x.id)) loadedPosts.push(x); });
+  const ids = loadedPosts.map(x => x.id);
+  // Réactions des messages chargés, et messages plus anciens cités par une réponse.
+  const missing = [...new Set(loadedPosts.map(x => x.reply_to).filter(id => id && !ids.includes(id)))];
+  const [r, qt] = await Promise.all([
+    ids.length ? sb.from('reactions').select('post_id,user_id,emoji').in('post_id', ids) : { data: [] },
+    missing.length ? sb.from('posts').select('*').in('id', missing) : { data: [] },
+  ]);
+  const errs = [p, c, po, pin, r, qt, ct, v, bn].map(x => x.error).filter(Boolean);
   if (errs.length) { console.error(errs); banner('Impossible de lire les données.', 'Vérifie que le script schema.sql a bien été exécuté dans Supabase.'); }
   profiles = new Map((p.data || []).map(x => [x.id, x]));
   banned = new Set((bn.data || []).map(x => x.user_id));
   checkins = new Map(); (c.data || []).forEach(x => { if (!checkins.has(x.user_id)) checkins.set(x.user_id, {}); checkins.get(x.user_id)[x.day] = { status: x.status, late: x.late }; });
-  posts = po.data || [];
+  posts = loadedPosts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   reactions = new Map(); (r.data || []).forEach(x => { if (!reactions.has(x.post_id)) reactions.set(x.post_id, {}); reactions.get(x.post_id)[x.user_id] = x.emoji; });
-  comments = cm.data || [];
+  quoted = new Map((qt.data || []).map(x => [x.id, x]));
+  if (selected && !loadedPosts.some(x => x.id === selected)) selected = null;
   contests = new Map(); (ct.data || []).forEach(x => contests.set(x.target + '_' + x.day, { ...x, votes: {} }));
   (v.data || []).forEach(x => { const k = contests.get(x.target + '_' + x.day); if (k) k.votes[x.voter] = x.vote; });
   loaded = true; queue();
@@ -390,7 +627,7 @@ let channel = null;
 function subscribe() {
   if (channel) return;
   channel = sb.channel('nnn');
-  for (const t of ['profiles', 'banned', 'checkins', 'posts', 'reactions', 'comments', 'contests', 'votes'])
+  for (const t of ['profiles', 'banned', 'checkins', 'posts', 'reactions', 'contests', 'votes'])
     channel.on('postgres_changes', { event: '*', schema: 'public', table: t }, scheduleReload);
   channel.subscribe();
 }
@@ -433,11 +670,13 @@ function react(postId, e) {
   run(() => mine === e ? sb.from('reactions').delete().eq('post_id', postId).eq('user_id', me)
     : sb.from('reactions').upsert({ post_id: postId, user_id: me, emoji: e }, { onConflict: 'post_id,user_id' }));
 }
-async function addComment(postId, inp) {
-  const t = inp.value.trim(); if (!t) return;
-  if (await run(() => sb.from('comments').insert({ post_id: postId, author: me, text: t.slice(0, 300) }))) { drafts[postId] = ''; }
+async function saveEdit(p, text) {
+  const t = text.trim(); if (!t) { toast('Le message ne peut pas être vide.'); return; }
+  if (t === p.text) { editing = null; queue(); return; }
+  if (await run(() => sb.from('posts').update({ text: t.slice(0, 500) }).eq('id', p.id), 'Message modifié')) { editing = null; delete drafts['e-' + p.id]; }
 }
-function delPost(id) { if (confirm('Supprimer ce message ? Ses réactions et commentaires partent avec.')) run(() => sb.from('posts').delete().eq('id', id), 'Message supprimé'); }
+function pinPost(p) { run(() => sb.from('posts').update({ pinned: !p.pinned }).eq('id', p.id), p.pinned ? 'Message désépinglé' : 'Message épinglé en haut du fil'); }
+function delPost(id) { if (confirm('Supprimer ce message pour tout le groupe ?')) run(() => sb.from('posts').delete().eq('id', id), 'Message supprimé'); }
 async function contest(p) {
   const ok = await run(() => sb.from('contests').insert({ target: p.author, day: p.day, opened_by: me }), 'Contestation ouverte. Le groupe vote.');
   if (ok) run(() => sb.from('votes').insert({ target: p.author, day: p.day, voter: me, vote: 'invalid' }));
@@ -497,14 +736,25 @@ $('setup-form').addEventListener('submit', async e => {
   forget('nnn-pseudo');
   await loadAll(); toast('Bienvenue sur le mur, ' + pseudo);
 });
-$('composer').addEventListener('input', e => { $('ccount').textContent = e.target.value.length + '/500'; try { localStorage.setItem('nnn-draft', e.target.value); } catch (_) {} });
-try { const d = localStorage.getItem('nnn-draft'); if (d) { $('composer').value = d; $('ccount').textContent = d.length + '/500'; } } catch (_) {}
-$('composer-form').addEventListener('submit', async e => {
-  e.preventDefault(); const t = $('composer').value.trim(); if (!t) return;
-  if (await run(() => sb.from('posts').insert({ author: me, kind: 'text', text: t.slice(0, 500) }), 'Publié')) {
-    $('composer').value = ''; $('ccount').textContent = '0/500'; try { localStorage.removeItem('nnn-draft'); } catch (_) {}
+$('composer').addEventListener('input', composerChanged);
+$('composer').addEventListener('click', renderMentions);
+$('composer').addEventListener('keydown', e => {
+  if (e.key === 'Escape') { if (!$('mention-list').hidden) $('mention-list').hidden = true; else if (replyTo) { replyTo = null; queue(); } return; }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    const first = !$('mention-list').hidden && $('mention-list').querySelector('button');
+    if (first) { e.preventDefault(); first.click(); return; }
+    if (!matchMedia('(pointer: coarse)').matches) { e.preventDefault(); sendMessage(); }
   }
 });
+try { const d = localStorage.getItem('nnn-draft'); if (d) $('composer').value = d; } catch (_) {}
+composerChanged(); $('mention-list').hidden = true;
+$('composer-form').addEventListener('submit', e => { e.preventDefault(); sendMessage(); });
+// Garder le clavier ouvert : appuyer sur Envoyer ou sur ✕ ne fait pas perdre le focus de la saisie.
+$('composer-form').addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
+$('tobottom').onclick = () => { window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' }); };
+let scrollT = null;
+window.addEventListener('scroll', () => { if (tab !== 'feed') return; clearTimeout(scrollT); scrollT = setTimeout(updateToBottom, 80); }, { passive: true });
+document.addEventListener('click', e => { if (selected && !e.target.closest('.msg, .sysmsg')) { selected = null; queue(); } });
 $('me-btn').onclick = ev => { ev.stopPropagation(); $('me-menu').hidden = !$('me-menu').hidden; };
 document.addEventListener('click', ev => { if (!$('me-menu').contains(ev.target)) $('me-menu').hidden = true; });
 $('rename-btn').onclick = async () => {
@@ -529,8 +779,9 @@ $('install-btn').onclick = async () => {
 if ('serviceWorker' in navigator && location.protocol === 'https:') window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
 $('share-btn').onclick = shareRecap;
 $('logout-btn').onclick = async () => { $('me-menu').hidden = true; await sb.auth.signOut(); };
-document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => { tab = b.dataset.tab; location.hash = tab; window.scrollTo(0, 0); queue(); }));
-function fromHash() { const t = location.hash.slice(1); if (['today', 'board', 'feed'].includes(t)) { tab = t; queue(); } }
+function goTab(t) { if (t !== 'feed' || tab !== 'feed') { unreadMark = null; selected = null; } tab = t; window.scrollTo(0, 0); queue(); if (t === 'feed') requestAnimationFrame(() => requestAnimationFrame(composerChanged)); }
+document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => { const t = b.dataset.tab; if (location.hash.slice(1) !== t) location.hash = t; goTab(t); }));
+function fromHash() { const t = location.hash.slice(1); if (['today', 'board', 'feed'].includes(t) && t !== tab) goTab(t); }
 window.addEventListener('hashchange', fromHash);
 
 $('forgot-btn').addEventListener('click', async () => {

@@ -132,13 +132,22 @@
     </section>
 
     <!-- ===== Groupe ===== -->
-    <section id="v-feed" class="stack" hidden>
-      <form class="panel composer" id="composer-form">
-        <label class="kicker" for="composer">Écrire au groupe</label>
-        <textarea id="composer" rows="3" maxlength="500" placeholder="Un encouragement, une galère, une astuce pour tenir…"></textarea>
-        <div class="row-between"><span class="mono dim" id="ccount">0/500</span><button class="btn" type="submit" id="post-btn">Publier</button></div>
+    <section id="v-feed" class="chat-view" hidden>
+      <div class="chat-top">
+        <div class="chips" id="feed-filters" role="group" aria-label="Filtrer la discussion"></div>
+        <button class="pinbar" type="button" id="pinbar" hidden></button>
+      </div>
+      <div class="chat" id="feed" role="log" aria-label="Discussion du groupe"></div>
+      <button class="tobottom" type="button" id="tobottom" aria-label="Aller aux derniers messages" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg><b id="tobottom-n" hidden></b></button>
+      <form class="composer" id="composer-form">
+        <div class="replybar" id="replybar" hidden></div>
+        <div class="mentions" id="mention-list" role="listbox" aria-label="Mentionner un membre" hidden></div>
+        <div class="cbox">
+          <textarea id="composer" rows="1" maxlength="500" placeholder="Message au groupe" aria-label="Écrire au groupe"></textarea>
+          <button class="send" type="submit" id="post-btn" aria-label="Envoyer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 16-2.5-6.5z"/></svg></button>
+        </div>
+        <span class="mono dim ccount" id="ccount" hidden></span>
       </form>
-      <div class="feed" id="feed"></div>
     </section>
   </div>
 </main>
