@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#121417">
+<title>Club No Nut November</title>
+<meta name="description" content="Le mur du groupe pour tenir les 30 jours de novembre.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23121417'/%3E%3Cg stroke='%23eceae4' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M8 7v18M13 7v18M18 7v18M23 7v18'/%3E%3Cpath d='M5 22L27 10' stroke='%238fd3ff'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800;900&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=IBM+Plex+Mono:wght@500;600&family=Permanent+Marker&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="#" aria-label="Club No Nut November">
+      <svg viewBox="0 0 40 24" aria-hidden="true"><g stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 3v18M13 3v18M20 3v18M27 3v18"/><path class="slash" d="M2 18L33 6"/></g></svg>
+      <span>NNN<em>club</em></span>
+    </a>
+    <div class="daypill" id="daypill">Novembre 2026</div>
+    <button class="me" id="me-btn" hidden aria-haspopup="true"><span class="avatar" id="me-av"></span></button>
+    <div class="menu" id="me-menu" hidden>
+      <div class="menu-name" id="me-name"></div>
+      <button id="logout-btn">Se déconnecter</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap stack">
+    <div class="banner" id="banner" hidden></div>
+
+    <!-- ===== Connexion ===== -->
+    <section id="v-auth" class="stack" hidden>
+      <div class="poster">
+        <p class="kicker">Novembre 2026 · 30 jours · zéro excuse</p>
+        <h1 class="poster-title">Tiens<br>le <span>mur</span>.</h1>
+        <p class="poster-sub">Chaque jour tenu, un bâton de plus sur le mur du groupe. Un serment par jour, le groupe pour témoin.</p>
+        <div class="poster-wall" aria-hidden="true" id="poster-wall"></div>
+      </div>
+      <form class="panel auth" id="auth-form" novalidate>
+        <div class="seg" role="tablist">
+          <button type="button" role="tab" id="tab-login" aria-selected="true">Connexion</button>
+          <button type="button" role="tab" id="tab-signup" aria-selected="false">Inscription</button>
+        </div>
+        <label class="field" id="f-pseudo" hidden><span>Pseudo</span><input id="in-pseudo" type="text" maxlength="24" autocomplete="nickname" placeholder="Comment le groupe t'appelle"></label>
+        <label class="field"><span>E-mail</span><input id="in-email" type="email" autocomplete="email" required placeholder="toi@exemple.com"></label>
+        <label class="field"><span>Mot de passe</span><input id="in-pass" type="password" autocomplete="current-password" minlength="6" required placeholder="6 caractères minimum"></label>
+        <p class="form-msg" id="auth-msg" role="status"></p>
+        <button class="btn big" type="submit" id="auth-submit">Entrer</button>
+        <button class="textbtn" type="button" id="forgot-btn">Mot de passe oublié ?</button>
+      </form>
+    </section>
+
+    <!-- ===== Choix du pseudo ===== -->
+    <section id="v-setup" class="stack" hidden>
+      <form class="panel stack-s" id="setup-form">
+        <p class="kicker">Dernière étape</p>
+        <h2 class="h2">Ton nom sur le mur</h2>
+        <p class="dim">C'est le pseudo que verront les autres membres dans le classement et le fil.</p>
+        <label class="field"><span>Pseudo</span><input id="setup-pseudo" type="text" maxlength="24" required></label>
+        <p class="form-msg" id="setup-msg" role="status"></p>
+        <button class="btn big" type="submit" id="setup-submit">Rejoindre le défi</button>
+      </form>
+    </section>
+
+    <!-- ===== Nouveau mot de passe (lien reçu par e-mail) ===== -->
+    <section id="v-reset" class="stack" hidden>
+      <form class="panel stack-s" id="reset-form">
+        <p class="kicker">Mot de passe oublié</p>
+        <h2 class="h2">Choisis un nouveau mot de passe</h2>
+        <label class="field"><span>Nouveau mot de passe</span><input id="reset-pass" type="password" autocomplete="new-password" minlength="6" required placeholder="6 caractères minimum"></label>
+        <p class="form-msg" id="reset-msg" role="status"></p>
+        <button class="btn big" type="submit" id="reset-submit">Enregistrer</button>
+      </form>
+    </section>
+
+    <!-- ===== Membre retiré ===== -->
+    <section id="v-banned" class="stack" hidden>
+      <div class="panel stack-s">
+        <p class="kicker">Accès retiré</p>
+        <h2 class="h2">Tu as été retiré du défi</h2>
+        <p class="dim">L'organisateur t'a retiré du groupe. Si c'est une erreur, contacte-le : il peut te réintégrer.</p>
+      </div>
+    </section>
+
+    <!-- ===== Aujourd'hui ===== -->
+    <section id="v-today" class="stack" hidden>
+      <div class="hero" id="hero"></div>
+      <div class="panel stack-s">
+        <div class="row-between"><h2 class="h2">Mon mur</h2><span class="tag" id="my-tag"></span></div>
+        <div class="wall" id="my-wall"></div>
+        <div class="legend">
+          <span><i class="lg ok"></i>Tenu</span>
+          <span><i class="lg fail"></i>Craqué</span>
+          <span><i class="lg voided"></i>Annulé par vote</span>
+          <span><i class="lg missed"></i>Manqué</span>
+          <span><i class="lg pending"></i>Aujourd'hui</span>
+        </div>
+        <div class="stats" id="my-stats"></div>
+      </div>
+    </section>
+
+    <!-- ===== Classement ===== -->
+    <section id="v-board" class="stack" hidden>
+      <div class="row-between"><h2 class="h2 xl">Le classement</h2><span class="tag" id="lb-sum"></span></div>
+      <div class="podium" id="podium"></div>
+      <div class="panel lb" id="lb"></div>
+      <div class="panel stack-s">
+        <h2 class="h2">Le mur du groupe</h2>
+        <p class="dim">Une ligne par membre, une case par jour de novembre.</p>
+        <div class="grid-wrap"><table class="grid" id="grid"></table></div>
+      </div>
+    </section>
+
+    <!-- ===== Groupe ===== -->
+    <section id="v-feed" class="stack" hidden>
+      <form class="panel composer" id="composer-form">
+        <label class="kicker" for="composer">Écrire au groupe</label>
+        <textarea id="composer" rows="3" maxlength="500" placeholder="Un encouragement, une galère, une astuce pour tenir…"></textarea>
+        <div class="row-between"><span class="mono dim" id="ccount">0/500</span><button class="btn" type="submit" id="post-btn">Publier</button></div>
+      </form>
+      <div class="feed" id="feed"></div>
+    </section>
+  </div>
+</main>
+
+<nav class="tabs" id="tabs" aria-label="Sections" hidden>
+  <div class="wrap tabs-in">
+    <button data-tab="today"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4v16M10 4v16M14 4v16M18 4v16M3 17L21 7"/></svg>Aujourd'hui</button>
+    <button data-tab="board"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20v-7h5v7M9 20V8h6v12M15 20v-10h5v10M3 20h18"/></svg>Classement</button>
+    <button data-tab="feed"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H10l-5 4v-4H4z"/></svg>Le groupe<i class="dot" id="feed-dot" hidden></i></button>
+  </div>
+</nav>
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
