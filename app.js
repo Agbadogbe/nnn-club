@@ -2,6 +2,9 @@
 (() => {
 const YEAR = 2026, MONTH = 11, N = 30, TZ = 'Europe/Paris';
 const EMOJIS = ['🔥', '💪', '😂', '🫡'];
+// Clé publique des notifications (la clé privée reste côté serveur).
+const VAPID_PUBLIC = 'BM82FmYq0Po_1W3-f4zCWROBq4mRQcjibckFcjoxKSF-5yRY_OceMA9KUI6mfax_XqWwM0filADXG-DjBgCeub8';
+const VOTE_MS = 24 * 3600e3; // durée d'un vote de contestation
 const $ = id => document.getElementById(id);
 
 const cfg = window.NNN_CONFIG || {};
@@ -17,6 +20,12 @@ let checkins = new Map();            // id -> {day: {status, late}}
 let contests = new Map();            // "uid_day" -> {target, day, resolution, opened_by, votes:{voter:vote}}
 let posts = [], reactions = new Map(), quoted = new Map(); // quoted : messages plus anciens cités par une réponse
 const drafts = {};
+let reads = new Map();               // id -> dernière visite de la discussion (ms)
+let online = new Set();              // membres connectés en ce moment
+const typing = new Map();            // id -> minuterie « écrit… »
+const imgUrls = new Map();           // chemin photo -> { url signée, date }
+let pendingImg = null;               // photo prête à partir { blob, url }
+let room = null, lastTyping = 0, lastReadSent = 0;
 let busy = false, oathOk = false, confessOpen = false, freshStamp = false;
 let tab = 'today', lastSeenPost = +(saved('nnn-seen') || 0);
 let feedFilter = saved('nnn-filter') || 'all', postLimit = 100, morePosts = false, editing = null;
@@ -70,20 +79,27 @@ function electors(c) { const t0 = new Date(c.created_at); return members().filte
 function tally(c) { const el = new Set(electors(c)); let yes = 0, no = 0; for (const [v, x] of Object.entries(c.votes)) { if (!el.has(v)) continue; x === 'invalid' ? no++ : yes++; } return { yes, no, others: el.size }; }
 function votesOpen() { const p = paris(); return p.y === YEAR && (p.m === MONTH || (p.m === MONTH + 1 && p.d === 1)); }
 function hue(id) { let x = 2166136261; for (const c of String(id)) { x ^= c.charCodeAt(0); x = Math.imul(x, 16777619) >>> 0; } return Math.round((x % 12) * 30); }
-function avatar(id, cls = '') {
-  const n = nm(id).trim(); const ini = n.split(/\s+/).map(w => w[0]).join('').slice(0, 2) || '?';
-  return h('span', { class: 'avatar ' + cls, style: '--h:' + hue(id), 'aria-hidden': 'true', text: ini });
+function avatarUrl(id) { const a = profiles.get(id)?.avatar; return a ? cfg.SUPABASE_URL + '/storage/v1/object/public/avatars/' + a : null; }
+// link : l'avatar ouvre la fiche du membre.
+function avatar(id, cls = '', link = false) {
+  const n = nm(id).trim(); const ini = n.split(/\s+/).map(w => w[0]).join('').slice(0, 2) || '?', u = avatarUrl(id);
+  return h('span', { class: 'avatar ' + cls + (online.has(id) && id !== me ? ' on' : ''), style: '--h:' + hue(id),
+    ...(link ? { 'data-uid': id, role: 'button', tabindex: '0', 'aria-label': 'Profil de ' + nm(id) } : { 'aria-hidden': 'true' }) },
+    u ? h('img', { src: u, alt: '', loading: 'lazy', decoding: 'async', onerror: e => e.target.replaceWith(ini) }) : ini);
 }
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 2800); }
 function rand(seed) { let x = Math.sin(seed * 9301 + 49297) * 233280; return x - Math.floor(x); }
 
 /* ---------- calculs ---------- */
+function voteEnds(c) { return new Date(c.created_at).getTime() + VOTE_MS; }
 function contestState(c) {
   if (!c) return null;
   if (c.resolution) return c.resolution;
   const { yes, no, others } = tally(c);
   if (others > 0 && no * 2 > others) return 'invalid';
   if (others > 0 && yes * 2 >= others) return 'valid';
+  // Au bout de 24 h, la majorité des votants décide ; à égalité, le jour est maintenu.
+  if (Date.now() >= voteEnds(c) || !votesOpen()) return no > yes ? 'invalid' : 'valid';
   return 'open';
 }
 function stat(uid) {
@@ -158,7 +174,8 @@ function render() {
   if (authed) { $('me-av').replaceWith(Object.assign(avatar(me), { id: 'me-av' })); $('me-name').textContent = hasProfile ? nm(me) : (session.user.email || ''); }
   if (!authed) renderPoster();
   if (hasProfile) { renderToday(); renderBoard(); renderFeed(); }
-  renderRemind(hasProfile);
+  renderRemind(hasProfile); renderNotifCta(hasProfile);
+  if (sheetView?.type === 'profile' && $('sheet').open && !$('sheet').contains(document.activeElement)) renderSheet();
   document.body.classList.toggle('chat-on', hasProfile && tab === 'feed');
   if (aeId) { const n = $(aeId); if (n && n !== document.activeElement) { n.focus(); if (sel) try { n.setSelectionRange(...sel); } catch (_) {} } }
 }
@@ -275,13 +292,13 @@ function renderBoard() {
   $('podium').replaceChildren(...order.map(i => {
     const x = r[i];
     if (!x) return h('div', { class: 'pod empty' });
-    return h('div', { class: 'pod p' + (i + 1) }, h('span', { class: 'place', text: ['1er', '2e', '3e'][i] }), avatar(x.id, 'xl'), h('span', { class: 'nm', text: nm(x.id) }),
+    return h('div', { class: 'pod p' + (i + 1) }, h('span', { class: 'place', text: ['1er', '2e', '3e'][i] }), avatar(x.id, 'xl', true), h('span', { class: 'nm', text: nm(x.id) }),
       h('div', { class: 'block' }, h('b', { text: x.st.cur }), h('span', { text: 'jours de série' })));
   }));
   const lb = $('lb'); lb.replaceChildren();
   if (!r.length) lb.append(h('div', { class: 'empty', text: 'Personne sur le mur pour l\'instant.' }));
   r.forEach((x, i) => lb.append(h('div', { class: 'lb-row' },
-    h('span', { class: 'rank', text: i + 1 }), avatar(x.id),
+    h('span', { class: 'rank', text: i + 1 }), avatar(x.id, '', true),
     h('div', { class: 'lb-name' }, h('b', { text: nm(x.id) + (x.id === me ? ' (toi)' : '') }), h('div', { class: 'badges' }, badges(x.st)),
       admin && x.id !== me ? h('button', { class: 'linkbtn', onclick: () => removeMember(x.id), text: 'Retirer du défi' }) : null),
     h('div', { class: 'lb-score' }, h('b', { text: x.st.cur }), h('small', { text: x.st.ok + ' au total' })))));
@@ -335,13 +352,19 @@ function concernsMe(p) { return mentionsMe(p.text) || (p.kind === 'contest' && p
 // Texte court d'un message, pour les citations et la barre d'épinglage.
 function snippet(p) {
   if (!p) return 'Message supprimé';
-  if (p.kind === 'text') return p.text.length > 120 ? p.text.slice(0, 118) + '…' : p.text;
+  if (p.kind === 'text') { const t = p.text || ''; return (p.image ? '📷 ' : '') + (t ? (t.length > 120 ? t.slice(0, 118) + '…' : t) : 'Photo'); }
   return { ok: 'tient le jour ' + p.day, fail: 'avoue au jour ' + p.day, join: 'entre sur le mur', contest: 'conteste le jour ' + p.day + ' de ' + nm(p.target) }[p.kind] || '';
 }
 function setFilter(f) { feedFilter = f; try { localStorage.setItem('nnn-filter', f); } catch (_) {} stick = 'bottom'; queue(); }
 function markSeen() {
   const newest = Math.max(0, ...posts.map(p => +new Date(p.created_at)));
   if (newest > lastSeenPost) { lastSeenPost = newest; try { localStorage.setItem('nnn-seen', String(newest)); } catch (_) {} }
+  // « Vu par » : on signale sa visite (au plus toutes les 20 s).
+  const mine = reads.get(me) || 0;
+  if (document.visibilityState === 'visible' && (newest > mine || Date.now() - lastReadSent > 6e4) && Date.now() - lastReadSent > 2e4) {
+    lastReadSent = Date.now(); reads.set(me, Date.now());
+    sb.from('reads').upsert({ user_id: me }, { onConflict: 'user_id' }).then(() => {}, () => {});
+  }
 }
 function feedBadge() {
   const fresh = x => +new Date(x.created_at) > lastSeenPost && x.author !== me;
@@ -371,7 +394,7 @@ function renderFeed() {
   f.replaceChildren();
   const seenBefore = unreadMark ?? lastSeenPost;
   if (tab === 'feed' && loaded) { if (unreadMark == null) { unreadMark = atBottomTs = lastSeenPost; stick ||= 'unread'; } markSeen(); }
-  feedBadge();
+  feedBadge(); renderPresence();
   $('feed-filters').replaceChildren(...FILTERS.map(([k, label]) => h('button', { type: 'button', class: 'chip', 'aria-pressed': feedFilter === k ? 'true' : 'false', onclick: () => setFilter(k), text: label })));
 
   // Barre d'épinglage : le dernier message épinglé, un appui l'affiche (et passe au suivant).
@@ -424,6 +447,9 @@ function renderFeed() {
       f.append(bubble(p, cont)); prev = p;
     } else { f.append(p.kind === 'contest' ? contestCard(p) : sysPill(p)); prev = null; }
   }
+  // « Vu par » sous mon dernier message.
+  const myLast = list.findLast(p => p.kind === 'text' && p.author === me);
+  if (myLast) { const el = f.querySelector(`.msg[data-id="${CSS.escape(myLast.id)}"] .mcol`); if (el) el.append(seenLine(myLast)); }
 
   if (tab !== 'feed') return;
   if (keepFrom != null) { window.scrollTo(0, document.documentElement.scrollHeight - keepFrom); keepFrom = null; }
@@ -431,6 +457,24 @@ function renderFeed() {
   else if (wasBottom) toBottom();
   if (reveal) { reveal = false; f.querySelector('.sel .msg-actions')?.scrollIntoView({ block: 'nearest' }); }
   updateToBottom();
+}
+function seenLine(p) {
+  const t = +new Date(p.created_at), others = members().filter(id => id !== me);
+  const seen = others.filter(id => (reads.get(id) || 0) >= t);
+  let txt = 'Envoyé';
+  if (seen.length && seen.length === others.length) txt = others.length > 1 ? 'Vu par tout le monde' : 'Vu par ' + nm(seen[0]);
+  else if (seen.length) txt = 'Vu par ' + (seen.length <= 3 ? seen.map(nm).join(', ') : seen.slice(0, 2).map(nm).join(', ') + ` et ${seen.length - 2} autres`);
+  return h('span', { class: 'seen' + (seen.length ? ' yes' : ''), text: (seen.length ? '✓✓ ' : '✓ ') + txt });
+}
+// En ligne / en train d'écrire, sous les filtres.
+function renderPresence() {
+  const el = $('presence'); if (!el) return;
+  const tp = [...typing.keys()].filter(id => id !== me && profiles.has(id));
+  const on = [...online].filter(id => id !== me && profiles.has(id) && !banned.has(id));
+  el.classList.toggle('typing', !!tp.length);
+  if (tp.length) el.replaceChildren(h('span', { class: 'dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')), (tp.length === 1 ? nm(tp[0]) + ' écrit' : tp.slice(0, 2).map(nm).join(' et ') + (tp.length > 2 ? ' et d\'autres' : '') + ' écrivent') + '…');
+  else if (on.length) el.replaceChildren(h('span', { class: 'live', 'aria-hidden': 'true' }), `En ligne : ${on.length <= 3 ? on.map(nm).join(', ') : on.slice(0, 2).map(nm).join(', ') + ` et ${on.length - 2} autres`}`);
+  else el.replaceChildren('Personne d\'autre en ligne pour l\'instant');
 }
 // Bouton « derniers messages » quand on remonte, avec le nombre de messages reçus depuis.
 function updateToBottom() {
@@ -463,8 +507,8 @@ function actionBar(p) {
     h('div', { class: 'quick' }, EMOJIS.map(e => h('button', { type: 'button', class: 'react', 'aria-pressed': rx[me] === e ? 'true' : 'false', 'aria-label': 'Réagir ' + e, onclick: () => { selected = null; react(p.id, e); } }, e))),
     h('div', { class: 'actions' },
       h('button', { type: 'button', onclick: () => startReply(p), text: 'Répondre' }),
-      p.kind === 'text' ? h('button', { type: 'button', onclick: () => copyText(p.text), text: 'Copier' }) : null,
-      mine && editing !== p.id ? h('button', { type: 'button', onclick: () => { editing = p.id; selected = null; queue(); }, text: 'Modifier' }) : null,
+      p.kind === 'text' && p.text ? h('button', { type: 'button', onclick: () => copyText(p.text), text: 'Copier' }) : null,
+      mine && p.text && editing !== p.id ? h('button', { type: 'button', onclick: () => { editing = p.id; selected = null; queue(); }, text: 'Modifier' }) : null,
       admin && p.kind === 'text' ? h('button', { type: 'button', onclick: () => { selected = null; pinPost(p); }, text: p.pinned ? 'Désépingler' : 'Épingler' }) : null,
       canContest(p) ? h('button', { class: 'warn', type: 'button', onclick: () => { selected = null; contest(p); }, text: 'Contester' }) : null,
       mine || admin ? h('button', { class: 'del', type: 'button', onclick: () => { selected = null; delPost(p.id); }, text: 'Supprimer' }) : null));
@@ -481,19 +525,38 @@ function quoteBox(p) {
 function bubble(p, cont) {
   const mine = p.author === me, sel = selected === p.id, atMe = !mine && (mentionsMe(p.text) || repliesToMe(p));
   const b = h('div', { class: 'bubble', role: 'button', tabindex: '0', 'aria-label': 'Message de ' + nm(p.author) + ', options',
-    onclick: e => { if (e.target.closest('textarea,.btn,a,.mention')) return; select(p.id); }, onkeydown: e => { if ((e.key === 'Enter' || e.key === ' ') && e.target === b) { e.preventDefault(); select(p.id); } } });
-  if (!mine && !cont) b.append(h('b', { class: 'author', style: '--h:' + hue(p.author), text: nm(p.author) }));
+    onclick: e => { if (e.target.closest('textarea,.btn,a,.mention,.photo,[data-uid]')) return; select(p.id); }, onkeydown: e => { if ((e.key === 'Enter' || e.key === ' ') && e.target === b) { e.preventDefault(); select(p.id); } } });
+  if (!mine && !cont) b.append(h('b', { class: 'author', style: '--h:' + hue(p.author), 'data-uid': p.author, text: nm(p.author) }));
   const q = quoteBox(p); if (q) b.append(q);
+  if (p.image) b.append(photo(p));
   if (editing === p.id) {
     const ta = h('textarea', { id: 'e-' + p.id, rows: '3', maxlength: '500', 'aria-label': 'Modifier le message' }); ta.value = drafts['e-' + p.id] ?? p.text;
     ta.addEventListener('input', () => drafts['e-' + p.id] = ta.value);
     b.append(h('div', { class: 'stack-s edit' }, ta, h('div', { class: 'btn-row' },
       h('button', { class: 'btn', type: 'button', onclick: () => saveEdit(p, ta.value), text: 'Enregistrer' }),
       h('button', { class: 'btn ghost', type: 'button', onclick: () => { editing = null; delete drafts['e-' + p.id]; queue(); }, text: 'Annuler' }))));
-  } else b.append(h('p', { class: 'p-text' }, richText(p.text), h('span', { class: 'meta', text: (p.pinned ? '📌 ' : '') + (p.edited_at ? 'modifié · ' : '') + hm.format(new Date(p.created_at)) })));
+  } else {
+    const meta = h('span', { class: 'meta', text: (p.pinned ? '📌 ' : '') + (p.edited_at ? 'modifié · ' : '') + hm.format(new Date(p.created_at)) });
+    b.append(p.text ? h('p', { class: 'p-text' }, richText(p.text), meta) : h('div', { class: 'img-meta' }, meta));
+  }
+  if (p.image) b.classList.add('has-img');
   return h('div', { class: 'msg' + (mine ? ' mine' : '') + (cont ? ' cont' : '') + (atMe ? ' atme' : '') + (sel ? ' sel' : ''), 'data-id': p.id },
-    !mine ? (cont ? h('span', { class: 'avspace' }) : avatar(p.author, 'sm')) : null,
+    !mine ? (cont ? h('span', { class: 'avspace' }) : avatar(p.author, 'sm', true)) : null,
     h('div', { class: 'mcol' }, b, rxBar(p), sel ? actionBar(p) : null));
+}
+function photo(p) {
+  const u = imgUrls.get(p.image)?.url;
+  return h('button', { type: 'button', class: 'photo', 'aria-label': 'Agrandir la photo de ' + nm(p.author), onclick: e => { e.stopPropagation(); if (u) openViewer(u); } },
+    u ? h('img', { src: u, alt: 'Photo envoyée par ' + nm(p.author), loading: 'lazy', decoding: 'async' }) : h('span', { class: 'ph-wait', text: 'Photo…' }));
+}
+function openViewer(u) { $('viewer-img').src = u; const d = $('viewer'); if (!d.open) d.showModal(); }
+// Adresses temporaires des photos (privées : visibles par les membres seulement).
+async function signImages() {
+  const paths = [...new Set([...posts, ...quoted.values()].map(p => p.image).filter(x => x && (!imgUrls.has(x) || Date.now() - imgUrls.get(x).at > 5 * 3600e3)))];
+  if (!paths.length) return;
+  const { data } = await sb.storage.from('photos').createSignedUrls(paths, 6 * 3600);
+  (data || []).forEach(x => { if (x.signedUrl) imgUrls.set(x.path, { url: x.signedUrl, at: Date.now() }); });
+  queue();
 }
 function sysPill(p) {
   const sel = selected === p.id;
@@ -545,31 +608,72 @@ function composerChanged() {
   const c = $('composer');
   c.style.height = ''; if (c.offsetParent && c.value) c.style.height = Math.min(c.scrollHeight + 2, 150) + 'px';
   const n = c.value.length; $('ccount').hidden = n < 400; $('ccount').textContent = n + '/500';
-  $('post-btn').disabled = !c.value.trim();
+  $('post-btn').disabled = !c.value.trim() && !pendingImg;
+  if (c.value && room && Date.now() - lastTyping > 2500) { lastTyping = Date.now(); room.send({ type: 'broadcast', event: 'typing', payload: { id: me } }); }
   try { localStorage.setItem('nnn-draft', c.value); } catch (_) {}
   renderMentions();
 }
 async function sendMessage() {
-  const c = $('composer'), t = c.value.trim(); if (!t || busy) return;
-  const row = { author: me, kind: 'text', text: t.slice(0, 500) };
+  const c = $('composer'), t = c.value.trim(), img = pendingImg; if ((!t && !img) || busy) return;
+  const row = { author: me, kind: 'text', text: t ? t.slice(0, 500) : null };
   if (replyTo && postById(replyTo)) row.reply_to = replyTo;
-  if (await run(() => sb.from('posts').insert(row))) {
-    c.value = ''; replyTo = null; stick = 'bottom'; composerChanged(); try { localStorage.removeItem('nnn-draft'); } catch (_) {}
+  $('post-btn').classList.add('sending');
+  const ok = await run(async () => {
+    if (img) {
+      const path = me + '/' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.jpg';
+      const up = await sb.storage.from('photos').upload(path, img.blob, { contentType: 'image/jpeg', cacheControl: '31536000' });
+      if (up.error) return up;
+      row.image = path; imgUrls.set(path, { url: img.url, at: Date.now() });
+    }
+    const res = await sb.from('posts').insert(row).select().single();
+    if (!res.error && res.data) onPost({ eventType: 'INSERT', new: res.data });
+    return res;
+  }, null, false);
+  $('post-btn').classList.remove('sending');
+  if (ok) {
+    c.value = ''; replyTo = null; pendingImg = null; renderImgBar(); stick = 'bottom'; composerChanged(); queue(); try { localStorage.removeItem('nnn-draft'); } catch (_) {}
     if (navigator.vibrate) try { navigator.vibrate(15); } catch (_) {}
   }
+}
+// Photo : réduite à 1600 px en JPEG avant l'envoi (rapide même en 4G).
+async function shrink(file, max = 1600, q = 0.82) {
+  let src;
+  try { src = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+  catch (_) { src = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('image illisible')); i.src = URL.createObjectURL(file); }); }
+  const w = src.width, hh = src.height, r = Math.min(1, max / Math.max(w, hh));
+  const cv = document.createElement('canvas'); cv.width = Math.round(w * r); cv.height = Math.round(hh * r);
+  const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(src, 0, 0, cv.width, cv.height);
+  return new Promise((res, rej) => cv.toBlob(b => b ? res(b) : rej(new Error('image')), 'image/jpeg', q));
+}
+async function pickPhoto(file) {
+  if (!file) return;
+  if (!/^image\//.test(file.type) && !/\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name)) { toast('Choisis une image.'); return; }
+  try {
+    const blob = await shrink(file);
+    if (blob.size > 6e6) { toast('Photo trop lourde.'); return; }
+    if (pendingImg) URL.revokeObjectURL(pendingImg.url);
+    pendingImg = { blob, url: URL.createObjectURL(blob) }; renderImgBar(); composerChanged(); $('composer').focus();
+  } catch (_) { toast('Impossible de lire cette photo. Essaie une capture d\'écran ou une photo JPEG.'); }
+}
+function renderImgBar() {
+  const bar = $('imgbar'); bar.hidden = !pendingImg;
+  if (pendingImg) bar.replaceChildren(h('img', { src: pendingImg.url, alt: 'Photo à envoyer' }), h('span', { class: 'dim', text: 'Ajoute une légende si tu veux, puis envoie.' }),
+    h('button', { type: 'button', class: 'x', 'aria-label': 'Retirer la photo', onclick: () => { URL.revokeObjectURL(pendingImg.url); pendingImg = null; renderImgBar(); composerChanged(); }, text: '✕' }));
 }
 
 function voteBox(c) {
   const box = h('div', { class: 'vote' });
   if (!c) { box.append(h('span', { class: 'dim', text: 'Contestation clôturée.' })); return box; }
   const state = contestState(c), t = tally(c), yes = t.yes, no = t.no, others = Math.max(1, t.others);
-  const canVote = votesOpen() && !banned.has(me) && new Date(profiles.get(me)?.created_at || 0) <= new Date(c.created_at);
+  const left = voteEnds(c) - Date.now(), timeUp = left <= 0;
+  const canVote = votesOpen() && !timeUp && !banned.has(me) && new Date(profiles.get(me)?.created_at || 0) <= new Date(c.created_at);
   box.append(h('div', { class: 'row-between' },
-    h('b', { text: { open: 'Vote en cours', valid: 'Jour maintenu', invalid: 'Jour annulé' }[state] + (c.resolution ? ' par l\'organisateur' : '') }),
+    h('b', { text: { open: 'Vote en cours', valid: 'Jour maintenu', invalid: 'Jour annulé' }[state] + (c.resolution ? ' par l\'organisateur' : '')
+      + (state === 'open' && !timeUp ? ` · encore ${Math.floor(left / 3600e3)} h ${String(Math.floor(left % 3600e3 / 60e3)).padStart(2, '0')}` : '') }),
     h('span', { class: 'mono dim', text: `${yes} y croient · ${no} doutent · ${others} votants` })));
   box.append(h('div', { class: 'meter', title: 'Le trait central marque la majorité' }, h('i', { style: `width:${Math.min(100, Math.round(no / others * 100))}%` })));
-  box.append(h('span', { class: 'dim', style: 'font-size:13px', text: 'Le jour est annulé si plus de la moitié des autres membres doutent.' }));
-  if (me !== c.target && !c.resolution && !canVote) box.append(h('span', { class: 'dim', style: 'font-size:13px', text: votesOpen() ? 'Tu as rejoint le groupe après l\'ouverture de cette contestation : tu ne votes pas.' : 'Les votes sont clos.' }));
+  box.append(h('span', { class: 'dim', style: 'font-size:13px', text: timeUp ? 'Vote clos après 24 h : la majorité des votants a décidé (égalité = jour maintenu).' : 'Annulé tout de suite si plus de la moitié des votants possibles doutent. Sinon, au bout de 24 h, la majorité des votes décide.' }));
+  if (me !== c.target && !c.resolution && !canVote) box.append(h('span', { class: 'dim', style: 'font-size:13px', text: timeUp || !votesOpen() ? 'Les votes sont clos.' : 'Tu as rejoint le groupe après l\'ouverture de cette contestation : tu ne votes pas.' }));
   if (me !== c.target && !c.resolution && canVote) {
     const mv = c.votes[me];
     box.append(h('div', { class: 'btn-row' },
@@ -587,14 +691,15 @@ function voteBox(c) {
 /* ---------- données ---------- */
 async function loadAll() {
   if (!sb || !session) return;
-  const [p, c, po, pin, ct, v, bn] = await Promise.all([
-    sb.from('profiles').select('id,pseudo,created_at'),
+  const [p, c, po, pin, ct, v, bn, rd] = await Promise.all([
+    sb.from('profiles').select('id,pseudo,created_at,avatar'),
     sb.from('checkins').select('user_id,day,status,late'),
     sb.from('posts').select('*').order('created_at', { ascending: false }).limit(postLimit + 1),
     sb.from('posts').select('*').eq('pinned', true),
     sb.from('contests').select('*'),
     sb.from('votes').select('*'),
     sb.from('banned').select('user_id'),
+    sb.from('reads').select('user_id,seen_at'),
   ]);
   // Réactions et commentaires des seuls messages chargés.
   const recent = po.data || [];
@@ -619,7 +724,8 @@ async function loadAll() {
   if (selected && !loadedPosts.some(x => x.id === selected)) selected = null;
   contests = new Map(); (ct.data || []).forEach(x => contests.set(x.target + '_' + x.day, { ...x, votes: {} }));
   (v.data || []).forEach(x => { const k = contests.get(x.target + '_' + x.day); if (k) k.votes[x.voter] = x.vote; });
-  loaded = true; queue();
+  reads = new Map((rd.data || []).map(x => [x.user_id, +new Date(x.seen_at)]));
+  loaded = true; queue(); signImages();
 }
 let reloadT = null;
 function scheduleReload() { clearTimeout(reloadT); reloadT = setTimeout(loadAll, 250); }
@@ -627,14 +733,47 @@ let channel = null;
 function subscribe() {
   if (channel) return;
   channel = sb.channel('nnn');
-  for (const t of ['profiles', 'banned', 'checkins', 'posts', 'reactions', 'contests', 'votes'])
+  for (const t of ['profiles', 'banned', 'checkins', 'contests', 'votes'])
     channel.on('postgres_changes', { event: '*', schema: 'public', table: t }, scheduleReload);
-  channel.subscribe();
+  // Messages, réactions et « vu » : mis à jour sur place, sans tout recharger.
+  channel.on('postgres_changes', { event: '*', schema: 'public', table: 'posts' }, onPost);
+  channel.on('postgres_changes', { event: '*', schema: 'public', table: 'reactions' }, onReaction);
+  channel.on('postgres_changes', { event: '*', schema: 'public', table: 'reads' }, e => { if (e.new?.user_id) { reads.set(e.new.user_id, +new Date(e.new.seen_at)); queue(); } });
+  channel.subscribe(st => { if (st === 'SUBSCRIBED' && loaded) scheduleReload(); });
+  // Présence (en ligne) et « … écrit ».
+  room = sb.channel('nnn-room', { config: { presence: { key: me } } });
+  room.on('presence', { event: 'sync' }, () => { online = new Set(Object.keys(room.presenceState())); queue(); });
+  room.on('broadcast', { event: 'typing' }, ({ payload }) => {
+    const id = payload?.id; if (!id || id === me || !online.has(id)) return;
+    clearTimeout(typing.get(id)); typing.set(id, setTimeout(() => { typing.delete(id); renderPresence(); }, 4000)); renderPresence();
+  });
+  room.subscribe(st => { if (st === 'SUBSCRIBED') room.track({ at: Date.now() }); });
+}
+function onPost(e) {
+  if (e.eventType === 'DELETE') { const id = e.old?.id; if (!id) return scheduleReload(); posts = posts.filter(p => p.id !== id); if (selected === id) selected = null; queue(); return; }
+  const p = e.new; if (!p?.id) return scheduleReload();
+  const i = posts.findIndex(x => x.id === p.id);
+  if (i >= 0) posts[i] = { ...posts[i], ...p };
+  else { posts.unshift(p); posts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)); }
+  if (typing.has(p.author)) { clearTimeout(typing.get(p.author)); typing.delete(p.author); }
+  if (p.reply_to && !postById(p.reply_to)) scheduleReload();
+  if (p.kind === 'contest') scheduleReload();
+  if (p.image) signImages();
+  queue();
+}
+function onReaction(e) {
+  const r = e.eventType === 'DELETE' ? e.old : e.new; if (!r?.post_id) return scheduleReload();
+  const rx = reactions.get(r.post_id) || {};
+  if (e.eventType === 'DELETE') delete rx[r.user_id]; else rx[r.user_id] = r.emoji;
+  reactions.set(r.post_id, rx); queue();
 }
 
 /* ---------- actions ---------- */
 function friendly(e) {
   const m = (e && (e.message || e.error_description)) || '';
+  if (/NNN_SLOW/.test(m)) return 'Doucement : 8 messages par minute maximum. Réessaie dans un instant.';
+  if (/NNN_BAD_PATH/.test(m)) return 'Photo refusée.';
+  if (/Payload too large|exceeded the maximum/i.test(m)) return 'Photo trop lourde.';
   if (/NNN_BANNED/.test(m)) return 'Tu as été retiré du défi par l\'organisateur.';
   if (/duplicate key.*pseudo|profiles_pseudo_unique/i.test(m)) return 'Ce pseudo est déjà pris.';
   if (/row-level security|violates/i.test(m)) return 'Action refusée : elle ne respecte pas les règles du défi.';
@@ -648,12 +787,12 @@ function friendly(e) {
   if (/fetch|network/i.test(m)) return 'Pas de connexion. Vérifie ton réseau.';
   return m || 'Action impossible pour le moment.';
 }
-async function run(fn, ok) {
+async function run(fn, ok, reload = true) {
   if (busy) return false; busy = true; queue();
   let success = false;
   try { const res = await fn(); if (res && res.error) throw res.error; success = true; if (ok) toast(ok); }
   catch (e) { console.error(e); toast(friendly(e)); }
-  busy = false; await loadAll(); return success;
+  busy = false; if (reload || !success) await loadAll(); else queue(); return success;
 }
 async function mark(val) {
   const ph = phase(); if (ph.s !== 'live') return;
@@ -666,9 +805,11 @@ async function mark(val) {
   if (done) { freshStamp = true; confessOpen = false; oathOk = false; queue(); if (navigator.vibrate) try { navigator.vibrate(val === 'ok' ? 40 : [30, 60, 30]); } catch (_) {} }
 }
 function react(postId, e) {
-  const mine = (reactions.get(postId) || {})[me];
+  const rx = reactions.get(postId) || {}, mine = rx[me];
+  if (mine === e) delete rx[me]; else rx[me] = e;
+  reactions.set(postId, rx); queue();
   run(() => mine === e ? sb.from('reactions').delete().eq('post_id', postId).eq('user_id', me)
-    : sb.from('reactions').upsert({ post_id: postId, user_id: me, emoji: e }, { onConflict: 'post_id,user_id' }));
+    : sb.from('reactions').upsert({ post_id: postId, user_id: me, emoji: e }, { onConflict: 'post_id,user_id' }), null, false);
 }
 async function saveEdit(p, text) {
   const t = text.trim(); if (!t) { toast('Le message ne peut pas être vide.'); return; }
@@ -676,7 +817,11 @@ async function saveEdit(p, text) {
   if (await run(() => sb.from('posts').update({ text: t.slice(0, 500) }).eq('id', p.id), 'Message modifié')) { editing = null; delete drafts['e-' + p.id]; }
 }
 function pinPost(p) { run(() => sb.from('posts').update({ pinned: !p.pinned }).eq('id', p.id), p.pinned ? 'Message désépinglé' : 'Message épinglé en haut du fil'); }
-function delPost(id) { if (confirm('Supprimer ce message pour tout le groupe ?')) run(() => sb.from('posts').delete().eq('id', id), 'Message supprimé'); }
+async function delPost(id) {
+  if (!confirm('Supprimer ce message pour tout le groupe ?')) return;
+  const img = postById(id)?.image;
+  if (await run(() => sb.from('posts').delete().eq('id', id), 'Message supprimé') && img) sb.storage.from('photos').remove([img]).then(() => {}, () => {});
+}
 async function contest(p) {
   const ok = await run(() => sb.from('contests').insert({ target: p.author, day: p.day, opened_by: me }), 'Contestation ouverte. Le groupe vote.');
   if (ok) run(() => sb.from('votes').insert({ target: p.author, day: p.day, voter: me, vote: 'invalid' }));
@@ -764,6 +909,111 @@ $('rename-btn').onclick = async () => {
   if (next.length < 2 || next.length > 24) { toast('Le pseudo doit faire entre 2 et 24 caractères.'); return; }
   run(() => sb.from('profiles').update({ pseudo: next }).eq('id', me), 'Pseudo changé : ' + next);
 };
+/* ---------- fiche membre ---------- */
+let sheetView = null;
+const sinceFmt = new Intl.DateTimeFormat('fr-FR', { timeZone: TZ, day: 'numeric', month: 'long' });
+function openSheet(view) { sheetView = view; renderSheet(); const d = $('sheet'); if (!d.open) d.showModal(); }
+function closeSheet() { const d = $('sheet'); if (d.open) d.close(); }
+$('sheet').addEventListener('close', () => { sheetView = null; });
+$('sheet').addEventListener('click', e => { if (e.target === $('sheet')) closeSheet(); });
+function sheetHead(title) { return h('div', { class: 'sheet-head' }, h('h2', { class: 'h2', text: title }), h('button', { type: 'button', class: 'x', 'aria-label': 'Fermer', onclick: closeSheet, text: '✕' })); }
+function renderSheet() {
+  const d = $('sheet'); if (!sheetView) return;
+  if (sheetView.type === 'notif') return renderNotifSheet();
+  const id = sheetView.id, pr = profiles.get(id); if (!pr) { closeSheet(); return; }
+  const st = stat(id), isMe = id === me;
+  const kids = [sheetHead(isMe ? 'Mon profil' : 'Profil'),
+    h('div', { class: 'prof' }, avatar(id, 'xxl'), h('div', { class: 'prof-id' }, h('b', { text: pr.pseudo }),
+      h('span', { class: 'dim', text: 'Sur le mur depuis le ' + sinceFmt.format(new Date(pr.created_at)) + (online.has(id) && !isMe ? ' · en ligne' : '') }),
+      h('div', { class: 'badges' }, banned.has(id) ? h('span', { class: 'badge bad', text: 'Retiré du défi' }) : badges(st)))),
+    h('div', { class: 'stats' }, [['Série en cours', st.cur], ['Jours tenus', st.ok], ['Meilleure série', st.best]].map(([l, v]) => h('div', { class: 'stat' }, h('b', { text: v }), h('span', { text: l })))),
+    h('div', { class: 'wall' }, wall(st.cells))];
+  if (isMe) {
+    const inp = h('input', { type: 'file', accept: 'image/*', hidden: true, onchange: e => setAvatar(e.target.files[0]) });
+    kids.push(h('div', { class: 'btn-row' },
+      h('label', { class: 'btn' }, inp, pr.avatar ? 'Changer la photo' : 'Ajouter une photo'),
+      pr.avatar ? h('button', { type: 'button', class: 'btn ghost', onclick: () => setAvatar(null), text: 'Retirer la photo' }) : null,
+      h('button', { type: 'button', class: 'btn ghost', onclick: () => { closeSheet(); $('rename-btn').click(); }, text: 'Changer de pseudo' })));
+  } else if (!banned.has(id)) {
+    kids.push(h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn', onclick: () => {
+      closeSheet(); if (tab !== 'feed') { location.hash = 'feed'; goTab('feed'); }
+      const c = $('composer'); c.value = (c.value ? c.value.replace(/\s*$/, ' ') : '') + '@' + pr.pseudo + ' '; composerChanged(); c.focus();
+    }, text: 'Mentionner dans la discussion' })));
+  }
+  d.replaceChildren(...kids);
+}
+async function setAvatar(file) {
+  const old = profiles.get(me)?.avatar;
+  const ok = await run(async () => {
+    let path = null;
+    if (file) {
+      const blob = await shrink(file, 512, 0.85);
+      path = me + '/' + Date.now() + '.jpg';
+      const up = await sb.storage.from('avatars').upload(path, blob, { contentType: 'image/jpeg', cacheControl: '31536000' });
+      if (up.error) return up;
+    }
+    return sb.from('profiles').update({ avatar: path }).eq('id', me);
+  }, file ? 'Photo de profil mise à jour' : 'Photo retirée');
+  if (ok && old) sb.storage.from('avatars').remove([old]).then(() => {}, () => {});
+  renderSheet();
+}
+// Avatars et pseudos cliquables : ouvrent la fiche du membre.
+document.addEventListener('click', e => { const t = e.target.closest('[data-uid]'); if (t && profiles.has(t.dataset.uid)) { e.stopPropagation(); openSheet({ type: 'profile', id: t.dataset.uid }); } }, true);
+document.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('[data-uid][role=button]')) { e.preventDefault(); openSheet({ type: 'profile', id: e.target.dataset.uid }); } });
+$('profile-btn').onclick = () => { $('me-menu').hidden = true; openSheet({ type: 'profile', id: me }); };
+
+/* ---------- notifications ---------- */
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+function b64u(s) { const p = '='.repeat((4 - s.length % 4) % 4), b = atob((s + p).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(b, c => c.charCodeAt(0)); }
+async function currentPush() {
+  if (!pushSupported() || Notification.permission !== 'granted') return null;
+  const reg = await navigator.serviceWorker.getRegistration(); const sub = reg && await reg.pushManager.getSubscription();
+  if (!sub) return null;
+  const { data } = await sb.from('push_subs').select('level').eq('endpoint', sub.endpoint).maybeSingle();
+  return data ? data.level : null;
+}
+async function enablePush(level) {
+  if (!pushSupported()) { toast(isIOS && !standalone() ? 'Sur iPhone, installe d\'abord l\'appli sur l\'écran d\'accueil.' : 'Ton navigateur ne gère pas les notifications.'); return false; }
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') { toast('Notifications refusées. Autorise-les dans les réglages du navigateur.'); renderSheet(); return false; }
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(VAPID_PUBLIC) });
+  const j = sub.toJSON();
+  const ok = await run(() => sb.from('push_subs').upsert({ endpoint: j.endpoint, user_id: me, p256dh: j.keys.p256dh, auth: j.keys.auth, level }, { onConflict: 'endpoint' }),
+    level === 'all' ? 'Notifications activées pour tous les messages' : 'Notifications activées', false);
+  renderSheet(); queue(); return ok;
+}
+async function disablePush() {
+  const reg = pushSupported() && await navigator.serviceWorker.getRegistration(), sub = reg && await reg.pushManager.getSubscription();
+  if (sub) { await sb.from('push_subs').delete().eq('endpoint', sub.endpoint); try { await sub.unsubscribe(); } catch (_) {} }
+  toast('Notifications coupées sur cet appareil'); renderSheet();
+}
+async function renderNotifSheet() {
+  const d = $('sheet'), lvl = await currentPush(); if (sheetView?.type !== 'notif') return;
+  let state;
+  if (!pushSupported()) state = isIOS && !standalone() ? 'Sur iPhone, les notifications marchent seulement depuis l\'appli installée : Safari, bouton Partager, « Sur l\'écran d\'accueil », puis ouvre l\'appli et reviens ici.' : 'Ce navigateur ne gère pas les notifications.';
+  else if (Notification.permission === 'denied') state = 'Les notifications sont bloquées pour ce site. Autorise-les dans les réglages du navigateur, puis reviens ici.';
+  else state = lvl === 'all' ? 'Activées : tous les messages.' : lvl ? 'Activées : seulement l\'important.' : 'Désactivées sur cet appareil.';
+  const opt = (k, title, sub) => h('button', { type: 'button', class: 'opt', 'aria-pressed': lvl === k ? 'true' : 'false', disabled: !pushSupported() || Notification.permission === 'denied', onclick: () => enablePush(k) }, h('b', { text: title }), h('span', { text: sub }));
+  d.replaceChildren(sheetHead('Notifications'), h('p', { class: 'dim', text: state }),
+    opt('important', 'L\'important seulement', 'Rappel à 21 h et 23 h si tu n\'as pas validé, mentions, réponses à tes messages, contestations.'),
+    opt('all', 'Tous les messages', 'L\'important, plus chaque message du groupe.'),
+    lvl ? h('button', { type: 'button', class: 'btn ghost', onclick: disablePush, text: 'Couper sur cet appareil' }) : null);
+}
+$('notif-btn').onclick = () => { $('me-menu').hidden = true; openSheet({ type: 'notif' }); };
+$('notif-yes').onclick = () => enablePush('important');
+$('notif-later').onclick = () => { try { localStorage.setItem('nnn-notif-later', String(Date.now())); } catch (_) {} queue(); };
+function renderNotifCta(hasProfile) {
+  const later = +(saved('nnn-notif-later') || 0);
+  $('notif-cta').hidden = !(hasProfile && tab === 'today' && pushSupported() && Notification.permission === 'default' && Date.now() - later > 3 * 864e5);
+}
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { const go = e.data?.go; if (go && ['today', 'board', 'feed'].includes(go)) { location.hash = go; } });
+
+// Photos dans la discussion
+$('photo-in').addEventListener('change', e => { pickPhoto(e.target.files[0]); e.target.value = ''; });
+$('viewer').addEventListener('click', e => { if (e.target === $('viewer') || e.target.id === 'viewer-img') $('viewer').close(); });
+
 // Installation en appli : bouton natif (Android, Chrome) ou mode d'emploi (iPhone).
 let installEvt = null;
 const standalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;

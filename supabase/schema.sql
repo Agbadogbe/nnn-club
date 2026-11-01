@@ -80,6 +80,26 @@ alter table public.posts add column if not exists edited_at timestamptz;
 -- Discussion façon messagerie : un message peut répondre à un autre (citation).
 alter table public.posts add column if not exists reply_to uuid references public.posts(id) on delete set null;
 create index if not exists posts_reply_idx on public.posts (reply_to);
+-- Photos (chemin dans le stockage « photos ») et photo de profil (stockage « avatars »).
+alter table public.posts add column if not exists image text;
+alter table public.profiles add column if not exists avatar text;
+
+-- Dernière visite de la discussion, pour afficher « vu par ».
+create table if not exists public.reads (
+  user_id  uuid primary key default auth.uid() references public.profiles(id) on delete cascade,
+  seen_at  timestamptz not null default now()
+);
+
+-- Abonnements aux notifications (un par appareil).
+create table if not exists public.push_subs (
+  endpoint    text primary key,
+  user_id     uuid not null default auth.uid() references public.profiles(id) on delete cascade,
+  p256dh      text not null,
+  auth        text not null,
+  level       text not null default 'important' check (level in ('all','important')),
+  created_at  timestamptz not null default now()
+);
+create index if not exists push_subs_user_idx on public.push_subs (user_id);
 
 -- Membres retirés du défi par l'organisateur. Leur historique est conservé.
 create table if not exists public.banned (
@@ -142,6 +162,9 @@ create or replace function public.profiles_clean() returns trigger
 language plpgsql set search_path = public as $$
 begin
   new.pseudo := regexp_replace(trim(new.pseudo), '\s+', ' ', 'g');
+  if new.avatar is not null and split_part(new.avatar, '/', 1) <> new.id::text then
+    raise exception 'NNN_BAD_PATH';
+  end if;
   if tg_op = 'INSERT' then
     new.created_at := now();
   else
@@ -182,7 +205,7 @@ begin
   if not public.is_admin() then new.pinned := old.pinned; end if;
   if not (old.author = auth.uid() and old.kind = 'text') then new.text := old.text; end if;
   new.id := old.id; new.author := old.author; new.kind := old.kind; new.day := old.day;
-  new.target := old.target; new.late := old.late; new.created_at := old.created_at; new.reply_to := old.reply_to;
+  new.target := old.target; new.late := old.late; new.created_at := old.created_at; new.reply_to := old.reply_to; new.image := old.image;
   new.edited_at := case when new.text is distinct from old.text then now() else old.edited_at end;
   return new;
 end $$;
@@ -349,11 +372,12 @@ drop policy if exists posts_update on public.posts;
 create policy posts_read   on public.posts for select to authenticated using ((select public.is_member()));
 create policy posts_insert on public.posts for insert to authenticated
   with check (author = (select auth.uid()) and (select public.is_member()) and kind = 'text'
-              and text is not null and char_length(trim(text)) > 0
+              and ((text is not null and char_length(trim(text)) > 0) or image is not null)
+              and (image is null or split_part(image, '/', 1) = (select auth.uid())::text)
               and day is null and target is null and late = false);
 create policy posts_update on public.posts for update to authenticated
   using ((author = (select auth.uid()) and kind = 'text' and (select public.is_member())) or (select public.is_admin()))
-  with check (kind <> 'text' or char_length(trim(text)) > 0);
+  with check (kind <> 'text' or image is not null or char_length(trim(text)) > 0);
 create policy posts_delete on public.posts for delete to authenticated
   using ((author = (select auth.uid()) and kind = 'text') or (select public.is_admin()));
 
@@ -399,7 +423,8 @@ create policy contests_update on public.contests for update to authenticated
   with check ((select public.is_admin()) and target <> (select auth.uid()));
 create policy contests_delete on public.contests for delete to authenticated using ((select public.is_admin()));
 
--- Votes : un vote par personne, pas sur son propre jour, tant que la contestation est ouverte.
+-- Votes : un vote par personne, pas sur son propre jour, pendant les 24 h qui suivent l'ouverture.
+-- Après 24 h, la majorité des votants décide (égalité : le jour est maintenu).
 -- Seuls votent les membres déjà inscrits à l'ouverture (ce sont eux qui sont comptés).
 drop policy if exists votes_read   on public.votes;
 drop policy if exists votes_insert on public.votes;
@@ -410,7 +435,7 @@ create policy votes_insert on public.votes for insert to authenticated
     voter = (select auth.uid()) and voter <> target and (select public.is_member()) and public.nnn_votes_open()
     and exists (select 1 from public.contests k join public.profiles p on p.id = votes.voter
                 where k.target = votes.target and k.day = votes.day and k.resolution is null
-                  and p.created_at <= k.created_at)
+                  and p.created_at <= k.created_at and now() < k.created_at + interval '24 hours')
   );
 create policy votes_update on public.votes for update to authenticated
   using (voter = (select auth.uid()))
@@ -418,15 +443,153 @@ create policy votes_update on public.votes for update to authenticated
     voter = (select auth.uid()) and voter <> target and (select public.is_member()) and public.nnn_votes_open()
     and exists (select 1 from public.contests k join public.profiles p on p.id = votes.voter
                 where k.target = votes.target and k.day = votes.day and k.resolution is null
-                  and p.created_at <= k.created_at)
+                  and p.created_at <= k.created_at and now() < k.created_at + interval '24 hours')
   );
+
+-- ---------- Vu par, notifications -------------------------------------
+create or replace function public.reads_stamp() returns trigger
+language plpgsql set search_path = public as $$
+begin
+  new.seen_at := now();
+  return new;
+end $$;
+drop trigger if exists reads_stamp on public.reads;
+create trigger reads_stamp before insert or update on public.reads
+  for each row execute function public.reads_stamp();
+revoke execute on function public.reads_stamp() from public, anon, authenticated;
+
+alter table public.reads     enable row level security;
+alter table public.push_subs enable row level security;
+drop policy if exists reads_read   on public.reads;
+drop policy if exists reads_insert on public.reads;
+drop policy if exists reads_update on public.reads;
+create policy reads_read   on public.reads for select to authenticated using ((select public.is_member()));
+create policy reads_insert on public.reads for insert to authenticated
+  with check (user_id = (select auth.uid()) and (select public.is_member()));
+create policy reads_update on public.reads for update to authenticated
+  using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
+drop policy if exists push_read   on public.push_subs;
+drop policy if exists push_insert on public.push_subs;
+drop policy if exists push_update on public.push_subs;
+drop policy if exists push_delete on public.push_subs;
+create policy push_read   on public.push_subs for select to authenticated using (user_id = (select auth.uid()));
+create policy push_insert on public.push_subs for insert to authenticated
+  with check (user_id = (select auth.uid()) and (select public.is_member()));
+create policy push_update on public.push_subs for update to authenticated
+  using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
+create policy push_delete on public.push_subs for delete to authenticated using (user_id = (select auth.uid()));
+
+-- Envoi des notifications : la base appelle la fonction « nnn-push » (Edge Function)
+-- via pg_net. Adresse et clé dans private.settings (invisibles depuis l'appli) :
+--   insert into private.settings values ('push_url', 'https://<projet>.supabase.co/functions/v1/nnn-push'),
+--                                       ('push_key', '<une longue valeur aléatoire>');
+create schema if not exists private;
+revoke all on schema private from public, anon, authenticated;
+create table if not exists private.settings (key text primary key, value text not null);
+revoke all on private.settings from public, anon, authenticated;
+
+create or replace function public.nnn_push(payload jsonb) returns void
+language plpgsql security definer set search_path = public, private as $$
+declare u text; k text;
+begin
+  if to_regnamespace('net') is null then return; end if;
+  select value into u from private.settings where key = 'push_url';
+  select value into k from private.settings where key = 'push_key';
+  if u is null or k is null then return; end if;
+  execute 'select net.http_post(url := $1, body := $2, headers := $3, timeout_milliseconds := 5000)'
+    using u, payload, jsonb_build_object('Content-Type', 'application/json', 'x-nnn-key', k);
+exception when others then
+  raise warning 'nnn_push: %', sqlerrm;  -- une notification ratée ne bloque jamais un message
+end $$;
+revoke execute on function public.nnn_push(jsonb) from public, anon, authenticated;
+
+-- Lue par la fonction nnn-push (rôle service uniquement). Clés VAPID à ajouter dans private.settings :
+-- vapid_public, vapid_private (la clé publique est aussi dans app.js, VAPID_PUBLIC).
+create or replace function public.nnn_push_config() returns jsonb
+language sql stable security definer set search_path = private as $$
+  select coalesce(jsonb_object_agg(key, value), '{}'::jsonb) from private.settings
+  where key in ('push_key', 'vapid_public', 'vapid_private')
+$$;
+revoke execute on function public.nnn_push_config() from public, anon, authenticated;
+do $$ begin
+  if exists (select 1 from pg_roles where rolname = 'service_role') then
+    grant execute on function public.nnn_push_config() to service_role;
+  end if;
+end $$;
+
+create or replace function public.posts_push() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.kind in ('text', 'contest') then
+    perform public.nnn_push(jsonb_build_object('type', 'post', 'id', new.id));
+  end if;
+  return new;
+end $$;
+drop trigger if exists posts_push on public.posts;
+create trigger posts_push after insert on public.posts
+  for each row execute function public.posts_push();
+revoke execute on function public.posts_push() from public, anon, authenticated;
+
+-- Rappels : 21 h et 23 h à Paris en novembre (UTC+1), si pg_cron est activé.
+do $$
+begin
+  if to_regnamespace('cron') is not null then
+    perform cron.schedule('nnn-remind-21', '0 20 * 11 *', $c$select public.nnn_push('{"type":"remind","hour":21}')$c$);
+    perform cron.schedule('nnn-remind-23', '0 22 * 11 *', $c$select public.nnn_push('{"type":"remind","hour":23}')$c$);
+  end if;
+end $$;
+
+-- ---------- Photos ----------------------------------------------------
+-- « photos » : privé, lisible par les membres ; « avatars » : public.
+-- Chacun n'écrit que dans son dossier (<son id>/...).
+do $$
+begin
+  if to_regnamespace('storage') is null then return; end if;
+  insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+  values ('photos', 'photos', false, 6291456, array['image/jpeg','image/png','image/webp','image/gif']),
+         ('avatars', 'avatars', true, 2097152, array['image/jpeg','image/png','image/webp'])
+  on conflict (id) do nothing;
+  execute 'drop policy if exists nnn_photos_read on storage.objects';
+  execute 'drop policy if exists nnn_photos_insert on storage.objects';
+  execute 'drop policy if exists nnn_photos_delete on storage.objects';
+  execute 'drop policy if exists nnn_avatars_insert on storage.objects';
+  execute 'drop policy if exists nnn_avatars_delete on storage.objects';
+  execute $p$create policy nnn_photos_read on storage.objects for select to authenticated
+    using (bucket_id = 'photos' and (select public.is_member()))$p$;
+  execute $p$create policy nnn_photos_insert on storage.objects for insert to authenticated
+    with check (bucket_id = 'photos' and (storage.foldername(name))[1] = (select auth.uid())::text and (select public.is_member()))$p$;
+  execute $p$create policy nnn_photos_delete on storage.objects for delete to authenticated
+    using (bucket_id = 'photos' and ((storage.foldername(name))[1] = (select auth.uid())::text or (select public.is_admin())))$p$;
+  execute $p$create policy nnn_avatars_insert on storage.objects for insert to authenticated
+    with check (bucket_id = 'avatars' and (storage.foldername(name))[1] = (select auth.uid())::text and (select public.is_member()))$p$;
+  execute $p$create policy nnn_avatars_delete on storage.objects for delete to authenticated
+    using (bucket_id = 'avatars' and (storage.foldername(name))[1] = (select auth.uid())::text)$p$;
+end $$;
+
+-- ---------- Anti-spam ------------------------------------------------
+-- Au plus 8 messages par minute et par membre.
+create or replace function public.posts_rate() returns trigger
+language plpgsql set search_path = public as $$
+begin
+  if auth.uid() is not null and new.kind = 'text' and
+     (select count(*) from public.posts where author = new.author and kind = 'text'
+        and created_at > now() - interval '1 minute') >= 8 then
+    raise exception 'NNN_SLOW';
+  end if;
+  return new;
+end $$;
+drop trigger if exists posts_rate on public.posts;
+create trigger posts_rate before insert on public.posts
+  for each row execute function public.posts_rate();
+revoke execute on function public.posts_rate() from public, anon, authenticated;
+create index if not exists posts_author_idx on public.posts (author, created_at desc);
 
 -- ---------- Temps réel ------------------------------------------------
 
 do $$
 declare t text;
 begin
-  foreach t in array array['profiles','banned','checkins','posts','reactions','comments','contests','votes'] loop
+  foreach t in array array['profiles','banned','checkins','posts','reactions','comments','contests','votes','reads'] loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);
     exception when duplicate_object then null;

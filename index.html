@@ -31,6 +31,8 @@
     <button class="me" id="me-btn" hidden aria-haspopup="true"><span class="avatar" id="me-av"></span></button>
     <div class="menu" id="me-menu" hidden>
       <div class="menu-name" id="me-name"></div>
+      <button class="plain" id="profile-btn">Mon profil</button>
+      <button class="plain" id="notif-btn">Notifications</button>
       <button class="plain" id="rename-btn">Changer de pseudo</button>
       <button class="plain" id="install-btn" hidden>Installer l'appli</button>
       <button id="logout-btn">Se déconnecter</button>
@@ -42,6 +44,7 @@
   <div class="wrap stack">
     <div class="banner" id="banner" hidden></div>
     <div class="remind" id="remind" role="status" hidden></div>
+    <div class="remind" id="notif-cta" hidden><span><b>Active les notifications.</b> Rappel à 21 h si tu n'as pas validé, et alerte quand on te mentionne.</span><span class="btn-row"><button class="btn" type="button" id="notif-yes">Activer</button><button class="btn ghost" type="button" id="notif-later">Plus tard</button></span></div>
 
     <!-- ===== Connexion ===== -->
     <section id="v-auth" class="stack" hidden>
@@ -136,13 +139,16 @@
       <div class="chat-top">
         <div class="chips" id="feed-filters" role="group" aria-label="Filtrer la discussion"></div>
         <button class="pinbar" type="button" id="pinbar" hidden></button>
+        <div class="presence" id="presence" aria-live="polite"></div>
       </div>
       <div class="chat" id="feed" role="log" aria-label="Discussion du groupe"></div>
       <button class="tobottom" type="button" id="tobottom" aria-label="Aller aux derniers messages" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg><b id="tobottom-n" hidden></b></button>
       <form class="composer" id="composer-form">
         <div class="replybar" id="replybar" hidden></div>
         <div class="mentions" id="mention-list" role="listbox" aria-label="Mentionner un membre" hidden></div>
+        <div class="imgbar" id="imgbar" hidden></div>
         <div class="cbox">
+          <label class="attach" title="Envoyer une photo"><input type="file" id="photo-in" accept="image/*" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg><span class="sr">Envoyer une photo</span></label>
           <textarea id="composer" rows="1" maxlength="500" placeholder="Message au groupe" aria-label="Écrire au groupe"></textarea>
           <button class="send" type="submit" id="post-btn" aria-label="Envoyer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 16-2.5-6.5z"/></svg></button>
         </div>
@@ -160,6 +166,8 @@
   </div>
 </nav>
 <div class="toast" id="toast" role="status" hidden></div>
+<dialog class="sheet" id="sheet" aria-label="Fiche"></dialog>
+<dialog class="viewer" id="viewer" aria-label="Photo"><img id="viewer-img" alt="Photo en grand"><form method="dialog"><button class="x" aria-label="Fermer">✕</button></form></dialog>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script src="config.js"></script>
