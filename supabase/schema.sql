@@ -239,6 +239,16 @@ drop trigger if exists contests_post on public.contests;
 create trigger contests_post after insert on public.contests
   for each row execute function public.post_from_contest();
 
+-- Droits d'exécution : les fonctions des déclencheurs ne sont pas appelables depuis le site,
+-- is_admin() et is_member() seulement par les membres connectés.
+revoke execute on function public.post_from_checkin() from public, anon, authenticated;
+revoke execute on function public.post_from_contest() from public, anon, authenticated;
+revoke execute on function public.post_from_profile() from public, anon, authenticated;
+revoke execute on function public.is_admin() from public, anon;
+revoke execute on function public.is_member() from public, anon;
+grant execute on function public.is_admin() to authenticated;
+grant execute on function public.is_member() to authenticated;
+
 -- ---------- Mise à niveau des données existantes ----------------------
 
 -- Pseudos déjà enregistrés : on enlève les espaces en trop (ignoré en cas de doublon).
