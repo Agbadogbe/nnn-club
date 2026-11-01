@@ -155,8 +155,64 @@ function render() {
   if (authed) { $('me-av').replaceWith(Object.assign(avatar(me), { id: 'me-av' })); $('me-name').textContent = hasProfile ? nm(me) : (session.user.email || ''); }
   if (!authed) renderPoster();
   if (hasProfile) { renderToday(); renderBoard(); renderFeed(); }
+  renderRemind(hasProfile);
   if (aeId) { const n = $(aeId); if (n && n !== document.activeElement) { n.focus(); if (sel) try { n.setSelectionRange(...sel); } catch (_) {} } }
 }
+// Rappel avant minuit : à partir de 18 h (heure de Paris), tant que le jour n'est pas validé.
+function renderRemind(hasProfile) {
+  const box = $('remind'), ph = phase();
+  const st = hasProfile && ph.s === 'live' ? stat(me) : null;
+  const show = st && !st.today && paris().h >= 18 && tab !== 'today';
+  box.hidden = !show; if (!show) return;
+  const mid = untilMidnight(), late = mid.h < 2;
+  box.className = 'remind' + (late ? ' late' : '');
+  box.replaceChildren(h('span', {}, h('b', { text: `Jour ${ph.day} pas encore validé. ` }), `Il te reste ${mid.h} h ${String(mid.m).padStart(2, '0')} avant minuit.`),
+    h('button', { class: 'btn', type: 'button', onclick: () => { tab = 'today'; location.hash = 'today'; window.scrollTo(0, 0); queue(); }, text: 'Valider' }));
+}
+
+// Récap du mois (en cours pendant novembre, final ensuite), partageable.
+function recapData() {
+  const ph = phase(), r = ranked(), alive = r.filter(x => !x.st.out);
+  const sticks = r.reduce((n, x) => n + x.st.ok, 0);
+  const best = r.slice().sort((a, b) => b.st.best - a.st.best)[0];
+  const honest = r.filter(x => x.st.honest).length;
+  const voided = r.reduce((n, x) => n + x.st.cells.filter(c => c === 'voided').length, 0);
+  const legends = r.filter(x => x.st.best >= 30).map(x => nm(x.id));
+  return { ph, r, alive, sticks, best, honest, voided, legends };
+}
+function renderRecap() {
+  const d = recapData(), done = d.ph.s === 'after';
+  $('recap').hidden = d.ph.s === 'before' || !d.r.length;
+  if ($('recap').hidden) return;
+  $('recap-title').textContent = done ? 'Le récap de novembre' : `Le récap au jour ${d.ph.day}`;
+  const tile = (v, l) => h('div', {}, h('b', { text: v }), h('span', { text: l }));
+  $('recap-grid').replaceChildren(
+    tile(`${d.alive.length}/${d.r.length}`, done ? 'ont tenu les 30 jours' : 'encore en lice'),
+    tile(d.sticks, 'bâtons tracés par le groupe'),
+    tile(d.best && d.best.st.best ? d.best.st.best : 0, 'meilleure série (jours)'),
+    tile(d.honest, d.honest > 1 ? 'aveux honnêtes' : 'aveu honnête'));
+  const li = [];
+  if (d.best && d.best.st.best) li.push(h('li', {}, 'Meilleure série : ', h('b', { text: nm(d.best.id) }), ` (${d.best.st.best} j)`));
+  d.r.slice(0, 3).forEach((x, i) => li.push(h('li', {}, `${i + 1}${i ? 'e' : 'er'} du classement : `, h('b', { text: nm(x.id) }), ` (${x.st.cur} j de série, ${x.st.ok} au total)`)));
+  if (d.voided) li.push(h('li', { text: `${d.voided} jour${d.voided > 1 ? 's' : ''} annulé${d.voided > 1 ? 's' : ''} par vote du groupe` }));
+  if (d.legends.length) li.push(h('li', {}, 'Légendes 30 : ', h('b', { text: d.legends.join(', ') })));
+  $('recap-list').replaceChildren(...li);
+}
+function recapText() {
+  const d = recapData(), done = d.ph.s === 'after';
+  const lines = [done ? 'Club No Nut November : le récap' : `Club No Nut November : jour ${d.ph.day}/30`,
+    `${d.alive.length}/${d.r.length} ${done ? 'ont tenu les 30 jours' : 'encore en lice'}, ${d.sticks} bâtons tracés.`];
+  if (d.best && d.best.st.best) lines.push(`Meilleure série : ${nm(d.best.id)} (${d.best.st.best} j).`);
+  if (d.legends.length) lines.push(`Légendes 30 : ${d.legends.join(', ')}.`);
+  lines.push(location.origin);
+  return lines.join('\n');
+}
+async function shareRecap() {
+  const text = recapText();
+  try { if (navigator.share) { await navigator.share({ title: 'Club NNN', text }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(text); toast('Récap copié, colle-le où tu veux.'); } catch (_) { prompt('Copie le récap :', text); }
+}
+
 function daysBefore() { const now = new Date(); const start = new Date(Date.UTC(YEAR, MONTH - 1, 1)); return Math.max(1, Math.ceil((start - now) / 864e5)); }
 
 function renderPoster() {
@@ -229,6 +285,7 @@ function renderBoard() {
   if (out.length) lb.append(h('div', { class: 'retired' }, h('span', { class: 'dim', text: 'Retirés du défi :' }),
     out.map(id => h('span', { class: 'badge bad' }, nm(id),
       admin ? h('button', { class: 'linkbtn ok', style: 'margin:0 0 0 6px', onclick: () => reinstate(id), text: 'réintégrer' }) : null))));
+  renderRecap();
   const g = $('grid'); g.replaceChildren();
   if (!r.length) return;
   const head = h('tr', {}, h('th', { class: 'nm' }));
@@ -267,7 +324,7 @@ function renderFeed() {
     if (open) {
       const box = h('div', { class: 'comments' });
       cs.forEach(c => box.append(h('div', { class: 'cmt' }, avatar(c.author, 'sm'), h('div', {}, h('b', { text: nm(c.author) }), c.text,
-        (c.author === me || admin) ? h('button', { class: 'linkbtn', style: 'margin-left:8px', onclick: () => run(() => sb.from('comments').delete().eq('id', c.id)), text: 'suppr.' }) : null))));
+        (c.author === me || admin) ? h('button', { class: 'linkbtn', style: 'margin-left:8px', onclick: () => { if (confirm('Supprimer ce commentaire ?')) run(() => sb.from('comments').delete().eq('id', c.id)); }, text: 'suppr.' }) : null))));
       const inp = h('input', { type: 'text', id: 'c-' + p.id, maxlength: '300', placeholder: 'Ton commentaire…', 'aria-label': 'Commentaire' });
       inp.value = drafts[p.id] || ''; inp.addEventListener('input', () => drafts[p.id] = inp.value);
       box.append(h('form', { class: 'cform', onsubmit: e => { e.preventDefault(); addComment(p.id, inp); } }, inp, h('button', { class: 'btn', type: 'submit', text: 'Envoyer' })));
@@ -380,7 +437,7 @@ async function addComment(postId, inp) {
   const t = inp.value.trim(); if (!t) return;
   if (await run(() => sb.from('comments').insert({ post_id: postId, author: me, text: t.slice(0, 300) }))) { drafts[postId] = ''; }
 }
-function delPost(id) { run(() => sb.from('posts').delete().eq('id', id), 'Message supprimé'); }
+function delPost(id) { if (confirm('Supprimer ce message ? Ses réactions et commentaires partent avec.')) run(() => sb.from('posts').delete().eq('id', id), 'Message supprimé'); }
 async function contest(p) {
   const ok = await run(() => sb.from('contests').insert({ target: p.author, day: p.day, opened_by: me }), 'Contestation ouverte. Le groupe vote.');
   if (ok) run(() => sb.from('votes').insert({ target: p.author, day: p.day, voter: me, vote: 'invalid' }));
@@ -450,6 +507,27 @@ $('composer-form').addEventListener('submit', async e => {
 });
 $('me-btn').onclick = ev => { ev.stopPropagation(); $('me-menu').hidden = !$('me-menu').hidden; };
 document.addEventListener('click', ev => { if (!$('me-menu').contains(ev.target)) $('me-menu').hidden = true; });
+$('rename-btn').onclick = async () => {
+  $('me-menu').hidden = true;
+  const cur = nm(me), next = (prompt('Ton nouveau pseudo (2 à 24 caractères) :', cur) || '').trim();
+  if (!next || next === cur) return;
+  if (next.length < 2 || next.length > 24) { toast('Le pseudo doit faire entre 2 et 24 caractères.'); return; }
+  run(() => sb.from('profiles').update({ pseudo: next }).eq('id', me), 'Pseudo changé : ' + next);
+};
+// Installation en appli : bouton natif (Android, Chrome) ou mode d'emploi (iPhone).
+let installEvt = null;
+const standalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; $('install-btn').hidden = false; });
+window.addEventListener('appinstalled', () => { installEvt = null; $('install-btn').hidden = true; toast('Appli installée.'); });
+if (isIOS && !standalone()) $('install-btn').hidden = false;
+$('install-btn').onclick = async () => {
+  $('me-menu').hidden = true;
+  if (installEvt) { installEvt.prompt(); try { await installEvt.userChoice; } catch (_) {} installEvt = null; $('install-btn').hidden = true; return; }
+  alert('Sur iPhone : ouvre ce site dans Safari, touche le bouton Partager (carré avec une flèche), puis « Sur l\'écran d\'accueil ».');
+};
+if ('serviceWorker' in navigator && location.protocol === 'https:') window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+$('share-btn').onclick = shareRecap;
 $('logout-btn').onclick = async () => { $('me-menu').hidden = true; await sb.auth.signOut(); };
 document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => { tab = b.dataset.tab; location.hash = tab; window.scrollTo(0, 0); queue(); }));
 function fromHash() { const t = location.hash.slice(1); if (['today', 'board', 'feed'].includes(t)) { tab = t; queue(); } }
@@ -501,6 +579,6 @@ if (!sb) {
   sb.auth.onAuthStateChange((ev, sess) => { if (ev === 'PASSWORD_RECOVERY') { recovery = true; queue(); } if (ev === 'SIGNED_IN' && sess?.user?.id === me) return; if (ev === 'TOKEN_REFRESHED') { session = sess; return; } onSession(sess); });
 }
 let lastDay = phase().day;
-setInterval(() => { const d = phase().day; if (d !== lastDay) { lastDay = d; oathOk = false; confessOpen = false; } if (session && tab === 'today' && !document.activeElement?.closest?.('#hero')) queue(); }, 30000);
+setInterval(() => { const d = phase().day; if (d !== lastDay) { lastDay = d; oathOk = false; confessOpen = false; } if (session && tab === 'today' && !document.activeElement?.closest?.('#hero')) queue(); else if (session) renderRemind(profiles.has(me) && !banned.has(me) && !recovery); }, 30000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && session) loadAll(); });
 })();

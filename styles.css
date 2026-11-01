@@ -241,3 +241,30 @@ nav.tabs button[aria-current="page"]{color:var(--ice)}
 nav.tabs button[aria-current="page"]::before{content:"";position:absolute;top:0;left:30%;right:30%;height:3px;border-radius:0 0 3px 3px;background:var(--ice)}
 .dot{position:absolute;top:8px;left:calc(50% + 10px);width:8px;height:8px;border-radius:50%;background:var(--red)}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(88px + env(safe-area-inset-bottom,0px));z-index:40;background:var(--chalk);color:var(--bg);padding:11px 16px;border-radius:12px;font-weight:700;font-size:14px;max-width:calc(100% - 32px);box-shadow:0 10px 30px rgba(0,0,0,.3)}
+
+/* ---------- confort mobile : cibles tactiles et textes lisibles ---------- */
+.kicker,.tag,.field span,.bundle .lbl,.pod .block span,.lb-score small,.p-head .when,.stamp small{font-size:12px}
+.badge{font-size:12px;padding:3px 8px}
+table.grid{font-size:11px}
+.actions{gap:4px 6px;font-size:14px;margin-left:-10px}
+.actions button{min-height:40px;padding:8px 10px;border-radius:8px}
+.actions button:hover{background:var(--panel-2)}
+.react{min-height:40px;padding:6px 12px}
+.linkbtn{min-height:36px;padding:8px 0;display:inline-flex;align-items:center}
+.cmt .linkbtn{min-height:32px;padding:4px 6px}
+.menu button{min-height:44px}
+.menu button.plain{color:var(--chalk);font-weight:500}
+.textbtn{min-height:40px}
+/* rappel avant minuit */
+.remind{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 14px;border-radius:12px;background:var(--ice-soft);border:1px solid var(--ice);font-size:14px}
+.remind b{color:var(--ice)}
+.remind.late{background:var(--red-soft);border-color:var(--red)}
+.remind.late b{color:var(--red)}
+.remind .btn{padding:9px 14px;font-size:14px;min-height:40px}
+/* récap du mois */
+.recap-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.recap-grid div{background:var(--panel-2);border-radius:12px;padding:12px}
+.recap-grid b{display:block;font-family:var(--f-display);font-weight:800;font-size:30px;line-height:1}
+.recap-grid span{font-size:13px;color:var(--dim)}
+.recap-list{margin:0;padding-left:18px;color:var(--dim);font-size:14px}
+.recap-list b{color:var(--chalk)}

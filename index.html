@@ -7,6 +7,12 @@
 <title>Club No Nut November</title>
 <meta name="description" content="Le mur du groupe pour tenir les 30 jours de novembre.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23121417'/%3E%3Cg stroke='%23eceae4' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M8 7v18M13 7v18M18 7v18M23 7v18'/%3E%3Cpath d='M5 22L27 10' stroke='%238fd3ff'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NNN club">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800;900&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=IBM+Plex+Mono:wght@500;600&family=Permanent+Marker&display=swap">
@@ -25,6 +31,8 @@
     <button class="me" id="me-btn" hidden aria-haspopup="true"><span class="avatar" id="me-av"></span></button>
     <div class="menu" id="me-menu" hidden>
       <div class="menu-name" id="me-name"></div>
+      <button class="plain" id="rename-btn">Changer de pseudo</button>
+      <button class="plain" id="install-btn" hidden>Installer l'appli</button>
       <button id="logout-btn">Se déconnecter</button>
     </div>
   </div>
@@ -33,6 +41,7 @@
 <main>
   <div class="wrap stack">
     <div class="banner" id="banner" hidden></div>
+    <div class="remind" id="remind" role="status" hidden></div>
 
     <!-- ===== Connexion ===== -->
     <section id="v-auth" class="stack" hidden>
@@ -114,6 +123,11 @@
         <h2 class="h2">Le mur du groupe</h2>
         <p class="dim">Une ligne par membre, une case par jour de novembre.</p>
         <div class="grid-wrap"><table class="grid" id="grid"></table></div>
+      </div>
+      <div class="panel stack-s" id="recap">
+        <div class="row-between"><h2 class="h2" id="recap-title">Le récap</h2><button class="btn" type="button" id="share-btn">Partager</button></div>
+        <div class="recap-grid" id="recap-grid"></div>
+        <ul class="recap-list" id="recap-list"></ul>
       </div>
     </section>
 
