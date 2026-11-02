@@ -447,10 +447,11 @@ body.chat-on:has(#composer:focus) .composer{bottom:0;padding-bottom:max(10px,env
 /* ---------- groupes ---------- */
 .groupbar{display:flex;align-items:center;gap:8px}
 .groupbar:empty{display:none}
-.gname-btn{flex:1;min-width:0;display:flex;align-items:baseline;gap:8px;border:1px solid var(--rule);background:var(--panel);border-radius:12px;padding:9px 12px;text-align:left}
-.gname-btn b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--f-display);font-size:19px;font-weight:800;text-transform:uppercase;letter-spacing:.02em}
-.gname-btn .dim{flex:none;font-size:13px}
-.gname-btn .chev{margin-left:auto;color:var(--dim);flex:none}
+.gname-btn{flex:1;min-width:0;display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:8px;align-items:center;border:1px solid var(--rule);background:var(--panel);border-radius:12px;padding:6px 12px;text-align:left}
+.gname-btn .gdot{grid-column:2;grid-row:1}
+.gname-btn b{grid-column:1;line-height:1.15;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--f-display);font-size:19px;font-weight:800;text-transform:uppercase;letter-spacing:.02em}
+.gname-btn .dim{grid-column:1;font-size:12.5px;line-height:1.2}
+.gname-btn .chev{grid-column:2;grid-row:1 / span 2;color:var(--dim)}
 .gdot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ice);margin-left:6px;vertical-align:middle;flex:none}
 .btn.invite{flex:none;padding:10px 14px}
 .gear{flex:none;width:42px;height:42px;border-radius:12px;border:1px solid var(--rule);background:var(--panel);color:var(--dim);font-size:18px}
