@@ -1,5 +1,5 @@
 -- =====================================================================
--- Communauté : plusieurs groupes, invitations, classement global,
+-- Communauté : défi seul ou en groupes privés, invitations,
 -- signalements, suppression de compte.
 -- Ajouté le 2 novembre 2026. Relançable, ne supprime aucune donnée.
 -- (Inclus à la fin de schema.sql ; peut aussi être lancé seul.)
