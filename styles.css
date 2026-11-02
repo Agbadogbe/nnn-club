@@ -500,3 +500,4 @@ body.chat-on:has(#composer:focus) .composer{bottom:0;padding-bottom:max(10px,env
 .legal .site-foot{padding-bottom:40px}
 #v-board.solo>.row-between{order:-2}
 #v-board.solo>#grid-panel{order:-1}
+.tabs.two .tabs-in{grid-template-columns:repeat(2,1fr)}

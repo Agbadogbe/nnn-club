@@ -183,6 +183,10 @@ function render() {
   $('v-banned').hidden = !isBanned || recovery;
   $('v-setup').hidden = !authed || !loaded || recovery || isBanned || profiles.has(me);
   $('tabs').hidden = !hasProfile;
+  // Le classement n'existe que dans un groupe : en solo, l'onglet disparaît.
+  const boardBtn = document.querySelector('nav.tabs [data-tab=board]');
+  boardBtn.hidden = !gid; $('tabs').classList.toggle('two', !gid);
+  if (!gid && loaded && tab === 'board') { tab = 'today'; if (location.hash === '#board') history.replaceState(null, '', '#today'); }
   $('me-btn').hidden = !authed;
   for (const t of ['today', 'board', 'feed']) $('v-' + t).hidden = !hasProfile || tab !== t;
   document.querySelectorAll('nav.tabs button').forEach(b => b.setAttribute('aria-current', b.dataset.tab === tab ? 'page' : 'false'));
