@@ -78,10 +78,10 @@
       <section class="how stack-s" aria-labelledby="how-title">
         <h2 class="h2" id="how-title">Comment ça marche</h2>
         <ol class="steps">
-          <li><b>Crée ton groupe</b> ou rejoins celui de tes amis avec leur lien d'invitation.</li>
+          <li><b>Fais le défi seul</b>, ou crée un groupe privé et invite tes amis avec un lien.</li>
           <li><b>Chaque jour de novembre</b>, prête serment et trace ton bâton. Tu as craqué ? Tu le dis, c'est la règle.</li>
           <li><b>Le groupe veille</b> : discussion, réactions, et vote si un jour paraît douteux.</li>
-          <li><b>Grimpe au classement</b> de ton groupe et au classement de tous les participants.</li>
+          <li><b>Grimpe au classement</b> de ton groupe. Personne en dehors de ton groupe ne voit ton pseudo ni tes jours.</li>
         </ol>
         <p class="dim">Gratuit, sans publicité. Réservé aux 18 ans et plus. Tes messages ne sont lus que par les membres de tes groupes.</p>
       </section>
@@ -140,17 +140,13 @@
     <!-- ===== Classement ===== -->
     <section id="v-board" class="stack" hidden>
       <div class="row-between"><h2 class="h2 xl">Le classement</h2><span class="tag" id="lb-sum"></span></div>
-      <div class="seg" role="tablist" aria-label="Classement">
-        <button type="button" role="tab" id="bm-group" aria-selected="true">Mon groupe</button>
-        <button type="button" role="tab" id="bm-global" aria-selected="false">Tout le monde</button>
-      </div>
       <div class="groupbar" id="groupbar-board"></div>
       <div class="nogroup panel stack-s" id="nogroup-board" hidden></div>
       <div class="podium" id="podium"></div>
       <div class="panel lb" id="lb"></div>
       <div class="panel stack-s" id="grid-panel">
-        <h2 class="h2">Le mur du groupe</h2>
-        <p class="dim">Une ligne par membre, une case par jour de novembre.</p>
+        <h2 class="h2" id="grid-title">Le mur du groupe</h2>
+        <p class="dim" id="grid-sub">Une ligne par membre, une case par jour de novembre.</p>
         <div class="grid-wrap"><table class="grid" id="grid"></table></div>
       </div>
       <div class="panel stack-s" id="recap">

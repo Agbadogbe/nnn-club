@@ -81,6 +81,16 @@ create or replace function public.post_in_my_group(p uuid) returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from public.posts where id = p and public.in_group(group_id))
 $$;
+-- Les personnes que je peux voir : moi et les membres de mes groupes. Personne d'autre.
+create or replace function public.my_peers() returns setof uuid
+language sql stable security definer set search_path = public as $$
+  select auth.uid()
+  union
+  select b.user_id from public.group_members a join public.group_members b on b.group_id = a.group_id
+  where a.user_id = auth.uid() and public.is_member()
+$$;
+revoke execute on function public.my_peers() from public, anon;
+grant execute on function public.my_peers() to authenticated;
 revoke execute on function public.in_group(uuid) from public, anon;
 revoke execute on function public.is_group_admin(uuid) from public, anon;
 revoke execute on function public.post_in_my_group(uuid) from public, anon;
@@ -196,6 +206,7 @@ language sql stable security definer set search_path = public as $$
       (select count(*) from public.votes v join el on el.target = v.target and el.day = v.day and el.user_id = v.voter
         where v.target = c.target and v.day = c.day and v.vote = 'invalid') as no
     from public.contests c
+    where public.in_group(c.group_id) or public.is_admin()
   )
   select target, day, case
     when resolution is not null then resolution
@@ -369,6 +380,10 @@ alter table public.group_bans    enable row level security;
 alter table public.group_reads   enable row level security;
 alter table public.reports       enable row level security;
 
+-- Défi seul ou entre amis : on ne voit le profil et les jours que des membres de ses groupes.
+select pg_temp.pol('profiles_read', 'public.profiles', 'select', $q$id in (select public.my_peers()) or (select public.is_admin())$q$, null);
+select pg_temp.pol('checkins_read', 'public.checkins', 'select', $q$user_id in (select public.my_peers()) or (select public.is_admin())$q$, null);
+select pg_temp.pol('banned_read', 'public.banned', 'select', $q$user_id in (select public.my_peers()) or (select public.is_admin())$q$, null);
 select pg_temp.pol('groups_read', 'public.groups', 'select', $q$(select public.in_group(id)) or (select public.is_admin())$q$, null);
 select pg_temp.pol('groups_update', 'public.groups', 'update', $q$(select public.is_group_admin(id))$q$, $q$(select public.is_group_admin(id))$q$);
 select pg_temp.pol('gm_read', 'public.group_members', 'select', $q$(select public.in_group(group_id)) or user_id = (select auth.uid()) or (select public.is_admin())$q$, null);

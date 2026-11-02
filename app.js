@@ -81,7 +81,6 @@ function when(ts) {
 }
 function nm(id) { return profiles.get(id)?.pseudo || 'Ancien membre'; }
 function members() { return [...gmembers.keys()].filter(id => profiles.has(id) && !banned.has(id)); }
-function everyone() { return [...profiles.keys()].filter(id => !banned.has(id)); }
 const grp = () => myGroups.get(gid) || null;
 // Organisateur du groupe affiché (propriétaire ou admin), ou modérateur du site.
 function gadmin() { const r = gmembers.get(me)?.role; return admin || r === 'owner' || r === 'admin'; }
@@ -305,19 +304,18 @@ function renderToday() {
 }
 
 function renderBoard() {
-  const global = boardMode === 'global' || !gid;
-  $('bm-group').setAttribute('aria-selected', !global); $('bm-global').setAttribute('aria-selected', global);
-  $('nogroup-board').hidden = !(boardMode === 'group' && !gid);
-  if (!$('nogroup-board').hidden) $('nogroup-board').replaceChildren(...noGroupPanel());
-  $('groupbar-board').hidden = global;
-  $('grid-panel').hidden = $('recap').hidden = global;
-  if (boardMode === 'group' && !gid) { ['podium', 'lb'].forEach(i => $(i).replaceChildren()); $('lb-sum').textContent = ''; return; }
-  const all = global ? ranked(everyone()) : ranked();
-  const myRank = all.findIndex(x => x.id === me);
-  // Classement global : les 100 premiers, plus ma place si je suis plus loin.
-  const r = global ? all.slice(0, 100).concat(myRank >= 100 ? [all[myRank]] : []) : all;
+  // Sans groupe, on fait le défi seul : on ne voit que son propre mur.
+  const solo = !gid;
+  $('nogroup-board').hidden = !solo;
+  $('v-board').classList.toggle('solo', solo); $('lb-sum').hidden = solo;
+  if (solo) $('nogroup-board').replaceChildren(...noGroupPanel());
+  $('groupbar-board').hidden = $('podium').hidden = $('lb').hidden = $('recap').hidden = solo;
+  $('grid-title').textContent = solo ? 'Ton mur' : 'Le mur du groupe';
+  $('grid-sub').textContent = solo ? 'Une case par jour de novembre.' : 'Une ligne par membre, une case par jour de novembre.';
+  const all = solo ? ranked([me]) : ranked();
+  const r = all;
   const alive = all.filter(x => !x.st.out).length;
-  $('lb-sum').textContent = `${alive} en lice / ${all.length}`;
+  $('lb-sum').textContent = solo ? '' : `${alive} en lice / ${all.length}`;
   const order = [1, 0, 2];
   $('podium').replaceChildren(...order.map(i => {
     const x = r[i];
@@ -330,14 +328,13 @@ function renderBoard() {
   r.forEach((x, i) => lb.append(h('div', { class: 'lb-row' + (x.id === me ? ' me' : '') },
     h('span', { class: 'rank', text: all.indexOf(x) + 1 }), avatar(x.id, '', true),
     h('div', { class: 'lb-name' }, h('b', { text: nm(x.id) + (x.id === me ? ' (toi)' : '') }), h('div', { class: 'badges' }, badges(x.st)),
-      !global && gadmin() && x.id !== me && gmembers.get(x.id)?.role !== 'owner' ? h('button', { class: 'linkbtn', onclick: () => removeMember(x.id), text: 'Retirer du groupe' }) : null),
+      gadmin() && x.id !== me && gmembers.get(x.id)?.role !== 'owner' ? h('button', { class: 'linkbtn', onclick: () => removeMember(x.id), text: 'Retirer du groupe' }) : null),
     h('div', { class: 'lb-score' }, h('b', { text: x.st.cur }), h('small', { text: x.st.ok + ' au total' })))));
-  const out = global ? [] : [...gbans].filter(id => profiles.has(id));
+  const out = solo ? [] : [...gbans].filter(id => profiles.has(id));
   if (out.length) lb.append(h('div', { class: 'retired' }, h('span', { class: 'dim', text: 'Retirés du groupe :' }),
     out.map(id => h('span', { class: 'badge bad' }, nm(id),
       gadmin() ? h('button', { class: 'linkbtn ok', style: 'margin:0 0 0 6px', onclick: () => reinstate(id), text: 'autoriser à revenir' }) : null))));
-  if (global) return;
-  renderRecap();
+  if (!solo) renderRecap();
   const g = $('grid'); g.replaceChildren();
   if (!r.length) return;
   const head = h('tr', {}, h('th', { class: 'nm' }));
@@ -972,9 +969,6 @@ $('rename-btn').onclick = async () => {
   run(() => sb.from('profiles').update({ pseudo: next }).eq('id', me), 'Pseudo changé : ' + next);
 };
 /* ---------- groupes ---------- */
-let boardMode = saved('nnn-board') || 'group';
-$('bm-group').onclick = () => { boardMode = 'group'; try { localStorage.setItem('nnn-board', 'group'); } catch (_) {} queue(); };
-$('bm-global').onclick = () => { boardMode = 'global'; try { localStorage.setItem('nnn-board', 'global'); } catch (_) {} queue(); };
 function inviteUrl(g) { return location.origin + '/?invite=' + g.invite_code; }
 async function shareInvite() {
   const g = grp(); if (!g) return;
@@ -997,8 +991,8 @@ function renderGroupBars() {
 function noGroupPanel() {
   const name = h('input', { type: 'text', maxlength: '40', placeholder: 'Ex. Les moines de novembre', 'aria-label': 'Nom du groupe' });
   const code = h('input', { type: 'text', maxlength: '120', placeholder: 'Lien ou code d\'invitation', 'aria-label': 'Lien ou code d\'invitation' });
-  return [h('p', { class: 'kicker', text: 'Ton groupe' }), h('h2', { class: 'h2', text: 'Le défi se vit à plusieurs' }),
-    h('p', { class: 'dim', text: 'Crée un groupe et invite tes amis, ou rejoins le leur avec le lien qu\'ils t\'ont envoyé. En attendant, tu apparais au classement de tous les participants.' }),
+  return [h('p', { class: 'kicker', text: 'Ton groupe' }), h('h2', { class: 'h2', text: 'Tu fais le défi seul' }),
+    h('p', { class: 'dim', text: 'Pour le faire avec des amis, crée un groupe et invite-les, ou rejoins le leur avec le lien qu\'ils t\'ont envoyé. Seuls les membres d\'un même groupe se voient entre eux.' }),
     h('form', { class: 'stack-s', onsubmit: e => { e.preventDefault(); createGroup(name.value); } }, h('label', { class: 'field' }, h('span', { text: 'Créer un groupe' }), name), h('button', { class: 'btn', type: 'submit', text: 'Créer le groupe' })),
     h('form', { class: 'stack-s', onsubmit: e => { e.preventDefault(); joinByCode(code.value); } }, h('label', { class: 'field' }, h('span', { text: 'Rejoindre un groupe' }), code), h('button', { class: 'btn ghost', type: 'submit', text: 'Rejoindre' }))];
 }
