@@ -1,7 +1,7 @@
 /* Club NNN : service worker pour l'installation en appli et les notifications.
    Réseau d'abord pour les fichiers du site (toujours la dernière version), copie locale si hors ligne.
    Les appels à Supabase ne sont jamais mis en cache. */
-const CACHE = 'nnn-v2';
+const CACHE = 'nnn-v3';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/config.js', '/manifest.webmanifest', '/icons/icon-192.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => {
@@ -30,7 +30,7 @@ self.addEventListener('notificationclick', e => {
   const url = new URL(e.notification.data?.url || '/', self.location.origin);
   e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cs => {
     const c = cs.find(x => new URL(x.url).origin === self.location.origin);
-    if (c) { c.postMessage({ go: url.hash.slice(1) }); return c.focus(); }
+    if (c) { c.postMessage({ go: url.hash.slice(1), g: url.searchParams.get('g') }); return c.focus(); }
     return self.clients.openWindow(url.href);
   }));
 });

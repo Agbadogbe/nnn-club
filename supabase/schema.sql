@@ -3,6 +3,7 @@
 -- À coller dans Supabase > SQL Editor > New query, puis "Run".
 -- Le défi est fixé à novembre 2026 (heure de Paris), voir nnn_year().
 -- Le script peut être relancé sans risque : il ne supprime aucune donnée.
+-- Ensuite, lancer aussi communaute.sql (groupes, invitations, classement global).
 -- =====================================================================
 
 create extension if not exists pgcrypto;

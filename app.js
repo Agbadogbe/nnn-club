@@ -13,6 +13,15 @@ const sb = configured ? window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPAB
 
 /* ---------- état ---------- */
 let session = null, me = null, admin = false, loaded = false;
+// Groupes : ceux dont je suis membre, le groupe affiché, ses membres et ses exclus.
+let myGroups = new Map();            // id -> { id, name, invite_code, owner, role }
+let gid = null;                      // groupe affiché
+let gmembers = new Map();            // id -> { role, joined_at } (groupe affiché)
+let gbans = new Set();               // exclus du groupe affiché
+let verdicts = new Map();            // "uid_day" -> état (toutes les contestations du site)
+let reports = [];                    // signalements visibles (organisateurs, modération)
+let pendingInvite = null;            // { code, name, members } lien d'invitation en attente
+const otherNews = new Set();         // groupes ayant reçu un message pendant qu'on en regarde un autre
 let profiles = new Map();            // id -> {pseudo, created_at}
 let banned = new Set();              // membres retirés par l'organisateur (historique conservé)
 let recovery = false;                // ouverture depuis le lien « mot de passe oublié »
@@ -71,11 +80,16 @@ function when(ts) {
   return fmt.format(new Date(ts));
 }
 function nm(id) { return profiles.get(id)?.pseudo || 'Ancien membre'; }
-function members() { return [...profiles.keys()].filter(id => !banned.has(id)); }
+function members() { return [...gmembers.keys()].filter(id => profiles.has(id) && !banned.has(id)); }
+function everyone() { return [...profiles.keys()].filter(id => !banned.has(id)); }
+const grp = () => myGroups.get(gid) || null;
+// Organisateur du groupe affiché (propriétaire ou admin), ou modérateur du site.
+function gadmin() { const r = gmembers.get(me)?.role; return admin || r === 'owner' || r === 'admin'; }
+function joinedAt(id) { return new Date(gmembers.get(id)?.joined_at || profiles.get(id)?.created_at || 0); }
 // Contestations et votes ouverts pendant novembre et le 1er décembre (comme nnn_votes_open() côté serveur).
 // Votants d'une contestation : membres actifs inscrits avant son ouverture, hors personne contestée.
 // Un compte créé après l'ouverture ne compte pas ; un compte retiré par l'organisateur perd sa voix.
-function electors(c) { const t0 = new Date(c.created_at); return members().filter(id => id !== c.target && new Date(profiles.get(id).created_at) <= t0); }
+function electors(c) { const t0 = new Date(c.created_at); return members().filter(id => id !== c.target && joinedAt(id) <= t0); }
 function tally(c) { const el = new Set(electors(c)); let yes = 0, no = 0; for (const [v, x] of Object.entries(c.votes)) { if (!el.has(v)) continue; x === 'invalid' ? no++ : yes++; } return { yes, no, others: el.size }; }
 function votesOpen() { const p = paris(); return p.y === YEAR && (p.m === MONTH || (p.m === MONTH + 1 && p.d === 1)); }
 function hue(id) { let x = 2166136261; for (const c of String(id)) { x ^= c.charCodeAt(0); x = Math.imul(x, 16777619) >>> 0; } return Math.round((x % 12) * 30); }
@@ -102,6 +116,8 @@ function contestState(c) {
   if (Date.now() >= voteEnds(c) || !votesOpen()) return no > yes ? 'invalid' : 'valid';
   return 'open';
 }
+// Verdict d'un jour contesté : calculé en direct pour le groupe affiché, sinon celui du serveur.
+function dayState(uid, d) { const k = uid + '_' + d, c = contests.get(k); return c && c.group_id === gid ? contestState(c) : verdicts.get(k) || null; }
 function stat(uid) {
   const ph = phase(), days = checkins.get(uid) || {};
   let ok = 0, run = 0, best = 0, out = null; const cells = [];
@@ -110,7 +126,7 @@ function stat(uid) {
     if (d > ph.last) st = 'future';
     else {
       const v = days[d]?.status;
-      if (v === 'ok' && contestState(contests.get(uid + '_' + d)) === 'invalid') st = 'voided';
+      if (v === 'ok' && dayState(uid, d) === 'invalid') st = 'voided';
       else if (v === 'ok') st = 'ok';
       else if (v === 'fail') st = 'fail';
       else if (ph.s === 'after' || d < ph.day) st = 'missed';
@@ -122,8 +138,8 @@ function stat(uid) {
   }
   return { cells, ok, best, cur: run, out, honest: Object.values(days).some(x => x.status === 'fail'), today: ph.s === 'live' ? days[ph.day]?.status : null };
 }
-function ranked() {
-  return members().map(id => ({ id, st: stat(id) }))
+function ranked(ids = members()) {
+  return ids.map(id => ({ id, st: stat(id) }))
     .sort((a, b) => (!!a.st.out - !!b.st.out) || (b.st.cur - a.st.cur) || (b.st.ok - a.st.ok) || nm(a.id).localeCompare(nm(b.id)));
 }
 function badges(st) {
@@ -173,7 +189,10 @@ function render() {
   document.querySelectorAll('nav.tabs button').forEach(b => b.setAttribute('aria-current', b.dataset.tab === tab ? 'page' : 'false'));
   if (authed) { $('me-av').replaceWith(Object.assign(avatar(me), { id: 'me-av' })); $('me-name').textContent = hasProfile ? nm(me) : (session.user.email || ''); }
   if (!authed) renderPoster();
-  if (hasProfile) { renderToday(); renderBoard(); renderFeed(); }
+  if (hasProfile) { renderGroupBars(); renderToday(); renderBoard(); renderFeed(); }
+  $('site-foot').hidden = hasProfile && tab === 'feed';
+  $('mod-btn').hidden = !admin; $('mod-btn').textContent = 'Modération' + (reports.length ? ` (${new Set(reports.map(r => r.post_id)).size})` : '');
+  if (!authed) renderLanding();
   renderRemind(hasProfile); renderNotifCta(hasProfile);
   if (sheetView?.type === 'profile' && $('sheet').open && !$('sheet').contains(document.activeElement)) renderSheet();
   document.body.classList.toggle('chat-on', hasProfile && tab === 'feed');
@@ -286,8 +305,19 @@ function renderToday() {
 }
 
 function renderBoard() {
-  const r = ranked(), alive = r.filter(x => !x.st.out).length;
-  $('lb-sum').textContent = `${alive} en lice / ${r.length}`;
+  const global = boardMode === 'global' || !gid;
+  $('bm-group').setAttribute('aria-selected', !global); $('bm-global').setAttribute('aria-selected', global);
+  $('nogroup-board').hidden = !(boardMode === 'group' && !gid);
+  if (!$('nogroup-board').hidden) $('nogroup-board').replaceChildren(...noGroupPanel());
+  $('groupbar-board').hidden = global;
+  $('grid-panel').hidden = $('recap').hidden = global;
+  if (boardMode === 'group' && !gid) { ['podium', 'lb'].forEach(i => $(i).replaceChildren()); $('lb-sum').textContent = ''; return; }
+  const all = global ? ranked(everyone()) : ranked();
+  const myRank = all.findIndex(x => x.id === me);
+  // Classement global : les 100 premiers, plus ma place si je suis plus loin.
+  const r = global ? all.slice(0, 100).concat(myRank >= 100 ? [all[myRank]] : []) : all;
+  const alive = all.filter(x => !x.st.out).length;
+  $('lb-sum').textContent = `${alive} en lice / ${all.length}`;
   const order = [1, 0, 2];
   $('podium').replaceChildren(...order.map(i => {
     const x = r[i];
@@ -297,15 +327,16 @@ function renderBoard() {
   }));
   const lb = $('lb'); lb.replaceChildren();
   if (!r.length) lb.append(h('div', { class: 'empty', text: 'Personne sur le mur pour l\'instant.' }));
-  r.forEach((x, i) => lb.append(h('div', { class: 'lb-row' },
-    h('span', { class: 'rank', text: i + 1 }), avatar(x.id, '', true),
+  r.forEach((x, i) => lb.append(h('div', { class: 'lb-row' + (x.id === me ? ' me' : '') },
+    h('span', { class: 'rank', text: all.indexOf(x) + 1 }), avatar(x.id, '', true),
     h('div', { class: 'lb-name' }, h('b', { text: nm(x.id) + (x.id === me ? ' (toi)' : '') }), h('div', { class: 'badges' }, badges(x.st)),
-      admin && x.id !== me ? h('button', { class: 'linkbtn', onclick: () => removeMember(x.id), text: 'Retirer du défi' }) : null),
+      !global && gadmin() && x.id !== me && gmembers.get(x.id)?.role !== 'owner' ? h('button', { class: 'linkbtn', onclick: () => removeMember(x.id), text: 'Retirer du groupe' }) : null),
     h('div', { class: 'lb-score' }, h('b', { text: x.st.cur }), h('small', { text: x.st.ok + ' au total' })))));
-  const out = [...banned].filter(id => profiles.has(id));
-  if (out.length) lb.append(h('div', { class: 'retired' }, h('span', { class: 'dim', text: 'Retirés du défi :' }),
+  const out = global ? [] : [...gbans].filter(id => profiles.has(id));
+  if (out.length) lb.append(h('div', { class: 'retired' }, h('span', { class: 'dim', text: 'Retirés du groupe :' }),
     out.map(id => h('span', { class: 'badge bad' }, nm(id),
-      admin ? h('button', { class: 'linkbtn ok', style: 'margin:0 0 0 6px', onclick: () => reinstate(id), text: 'réintégrer' }) : null))));
+      gadmin() ? h('button', { class: 'linkbtn ok', style: 'margin:0 0 0 6px', onclick: () => reinstate(id), text: 'autoriser à revenir' }) : null))));
+  if (global) return;
   renderRecap();
   const g = $('grid'); g.replaceChildren();
   if (!r.length) return;
@@ -363,7 +394,7 @@ function markSeen() {
   const mine = reads.get(me) || 0;
   if (document.visibilityState === 'visible' && (newest > mine || Date.now() - lastReadSent > 6e4) && Date.now() - lastReadSent > 2e4) {
     lastReadSent = Date.now(); reads.set(me, Date.now());
-    sb.from('reads').upsert({ user_id: me }, { onConflict: 'user_id' }).then(() => {}, () => {});
+    if (gid) sb.from('group_reads').upsert({ group_id: gid, user_id: me }, { onConflict: 'group_id,user_id' }).then(() => {}, () => {});
   }
 }
 function feedBadge() {
@@ -486,7 +517,7 @@ function updateToBottom() {
 }
 
 function canContest(p) {
-  return p.kind === 'ok' && checkins.get(p.author)?.[p.day]?.status === 'ok' && votesOpen() && p.author !== me
+  return p.kind === 'ok' && gmembers.has(p.author) && checkins.get(p.author)?.[p.day]?.status === 'ok' && votesOpen() && p.author !== me
     && !banned.has(p.author) && !contests.has(p.author + '_' + p.day);
 }
 // Réactions affichées sous un message ; un appui montre qui a réagi.
@@ -509,9 +540,10 @@ function actionBar(p) {
       h('button', { type: 'button', onclick: () => startReply(p), text: 'Répondre' }),
       p.kind === 'text' && p.text ? h('button', { type: 'button', onclick: () => copyText(p.text), text: 'Copier' }) : null,
       mine && p.text && editing !== p.id ? h('button', { type: 'button', onclick: () => { editing = p.id; selected = null; queue(); }, text: 'Modifier' }) : null,
-      admin && p.kind === 'text' ? h('button', { type: 'button', onclick: () => { selected = null; pinPost(p); }, text: p.pinned ? 'Désépingler' : 'Épingler' }) : null,
+      gadmin() && p.kind === 'text' ? h('button', { type: 'button', onclick: () => { selected = null; pinPost(p); }, text: p.pinned ? 'Désépingler' : 'Épingler' }) : null,
+      !mine && p.author !== me && p.kind === 'text' ? h('button', { type: 'button', onclick: () => { selected = null; reportPost(p); }, text: 'Signaler' }) : null,
       canContest(p) ? h('button', { class: 'warn', type: 'button', onclick: () => { selected = null; contest(p); }, text: 'Contester' }) : null,
-      mine || admin ? h('button', { class: 'del', type: 'button', onclick: () => { selected = null; delPost(p.id); }, text: 'Supprimer' }) : null));
+      mine || gadmin() ? h('button', { class: 'del', type: 'button', onclick: () => { selected = null; delPost(p.id); }, text: 'Supprimer' }) : null));
   return bar;
 }
 function copyText(t) { selected = null; queue(); (navigator.clipboard?.writeText(t) || Promise.reject()).then(() => toast('Message copié'), () => toast('Copie impossible sur cet appareil')); }
@@ -615,7 +647,8 @@ function composerChanged() {
 }
 async function sendMessage() {
   const c = $('composer'), t = c.value.trim(), img = pendingImg; if ((!t && !img) || busy) return;
-  const row = { author: me, kind: 'text', text: t ? t.slice(0, 500) : null };
+  if (!gid) return;
+  const row = { author: me, kind: 'text', text: t ? t.slice(0, 500) : null, group_id: gid };
   if (replyTo && postById(replyTo)) row.reply_to = replyTo;
   $('post-btn').classList.add('sending');
   const ok = await run(async () => {
@@ -666,7 +699,7 @@ function voteBox(c) {
   if (!c) { box.append(h('span', { class: 'dim', text: 'Contestation clôturée.' })); return box; }
   const state = contestState(c), t = tally(c), yes = t.yes, no = t.no, others = Math.max(1, t.others);
   const left = voteEnds(c) - Date.now(), timeUp = left <= 0;
-  const canVote = votesOpen() && !timeUp && !banned.has(me) && new Date(profiles.get(me)?.created_at || 0) <= new Date(c.created_at);
+  const canVote = votesOpen() && !timeUp && !banned.has(me) && gmembers.has(me) && joinedAt(me) <= new Date(c.created_at);
   box.append(h('div', { class: 'row-between' },
     h('b', { text: { open: 'Vote en cours', valid: 'Jour maintenu', invalid: 'Jour annulé' }[state] + (c.resolution ? ' par l\'organisateur' : '')
       + (state === 'open' && !timeUp ? ` · encore ${Math.floor(left / 3600e3)} h ${String(Math.floor(left % 3600e3 / 60e3)).padStart(2, '0')}` : '') }),
@@ -681,7 +714,7 @@ function voteBox(c) {
       h('button', { class: 'btn ghost' + (mv === 'invalid' ? ' sel' : ''), onclick: () => vote(c, 'invalid'), text: 'Je doute' })));
   }
   if (me === c.target && !c.resolution) box.append(h('span', { class: 'dim', style: 'font-size:13px', text: 'Tu ne votes pas sur ton propre jour. Défends-toi en répondant dans la discussion.' }));
-  if (admin && me !== c.target) box.append(h('div', { class: 'btn-row' },
+  if (gadmin() && me !== c.target) box.append(h('div', { class: 'btn-row' },
     h('button', { class: 'btn ghost', onclick: () => resolve(c, 'valid'), text: 'Maintenir' }),
     h('button', { class: 'btn ghost', onclick: () => resolve(c, 'invalid'), text: 'Annuler le jour' }),
     c.resolution ? h('button', { class: 'btn ghost', onclick: () => resolve(c, null), text: 'Rendre au vote' }) : null));
@@ -691,17 +724,28 @@ function voteBox(c) {
 /* ---------- données ---------- */
 async function loadAll() {
   if (!sb || !session) return;
-  const [p, c, po, pin, ct, v, bn, rd] = await Promise.all([
+  const [p, c, mg, ct, v, bn, vd, rp] = await Promise.all([
     sb.from('profiles').select('id,pseudo,created_at,avatar'),
     sb.from('checkins').select('user_id,day,status,late'),
-    sb.from('posts').select('*').order('created_at', { ascending: false }).limit(postLimit + 1),
-    sb.from('posts').select('*').eq('pinned', true),
+    sb.from('group_members').select('group_id,role,groups(id,name,invite_code,owner)').eq('user_id', me),
     sb.from('contests').select('*'),
     sb.from('votes').select('*'),
     sb.from('banned').select('user_id'),
-    sb.from('reads').select('user_id,seen_at'),
+    sb.rpc('contest_verdicts'),
+    sb.from('reports').select('*'),
   ]);
-  // Réactions et commentaires des seuls messages chargés.
+  myGroups = new Map((mg.data || []).filter(x => x.groups).map(x => [x.group_id, { ...x.groups, role: x.role }]));
+  // Groupe affiché : celui demandé (lien, notification), sinon le dernier ouvert, sinon le premier.
+  if (!myGroups.has(gid)) { const last = saved('nnn-group'); gid = myGroups.has(last) ? last : myGroups.keys().next().value || null; }
+  if (gid) try { localStorage.setItem('nnn-group', gid); } catch (_) {}
+  let po = { data: [] }, pin = { data: [] }, gm = { data: [] }, gb = { data: [] }, rd = { data: [] };
+  if (gid) [po, pin, gm, gb, rd] = await Promise.all([
+    sb.from('posts').select('*').eq('group_id', gid).order('created_at', { ascending: false }).limit(postLimit + 1),
+    sb.from('posts').select('*').eq('group_id', gid).eq('pinned', true),
+    sb.from('group_members').select('user_id,role,joined_at').eq('group_id', gid),
+    sb.from('group_bans').select('user_id').eq('group_id', gid),
+    sb.from('group_reads').select('user_id,seen_at').eq('group_id', gid),
+  ]);
   const recent = po.data || [];
   morePosts = recent.length > postLimit;
   const loadedPosts = recent.slice(0, postLimit);
@@ -713,10 +757,12 @@ async function loadAll() {
     ids.length ? sb.from('reactions').select('post_id,user_id,emoji').in('post_id', ids) : { data: [] },
     missing.length ? sb.from('posts').select('*').in('id', missing) : { data: [] },
   ]);
-  const errs = [p, c, po, pin, r, qt, ct, v, bn].map(x => x.error).filter(Boolean);
-  if (errs.length) { console.error(errs); banner('Impossible de lire les données.', 'Vérifie que le script schema.sql a bien été exécuté dans Supabase.'); }
+  const errs = [p, c, mg, po, pin, gm, r, qt, ct, v, bn, vd].map(x => x.error).filter(Boolean);
+  if (errs.length) { console.error(errs); banner('Impossible de lire les données.', 'Recharge la page dans un instant.'); }
   profiles = new Map((p.data || []).map(x => [x.id, x]));
   banned = new Set((bn.data || []).map(x => x.user_id));
+  gmembers = new Map((gm.data || []).map(x => [x.user_id, x]));
+  gbans = new Set((gb.data || []).map(x => x.user_id));
   checkins = new Map(); (c.data || []).forEach(x => { if (!checkins.has(x.user_id)) checkins.set(x.user_id, {}); checkins.get(x.user_id)[x.day] = { status: x.status, late: x.late }; });
   posts = loadedPosts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   reactions = new Map(); (r.data || []).forEach(x => { if (!reactions.has(x.post_id)) reactions.set(x.post_id, {}); reactions.get(x.post_id)[x.user_id] = x.emoji; });
@@ -724,8 +770,10 @@ async function loadAll() {
   if (selected && !loadedPosts.some(x => x.id === selected)) selected = null;
   contests = new Map(); (ct.data || []).forEach(x => contests.set(x.target + '_' + x.day, { ...x, votes: {} }));
   (v.data || []).forEach(x => { const k = contests.get(x.target + '_' + x.day); if (k) k.votes[x.voter] = x.vote; });
+  verdicts = new Map((vd.data || []).map(x => [x.target + '_' + x.day, x.state]));
   reads = new Map((rd.data || []).map(x => [x.user_id, +new Date(x.seen_at)]));
-  loaded = true; queue(); signImages();
+  reports = rp.data || [];
+  loaded = true; joinRoom(); queue(); signImages();
 }
 let reloadT = null;
 function scheduleReload() { clearTimeout(reloadT); reloadT = setTimeout(loadAll, 250); }
@@ -733,15 +781,21 @@ let channel = null;
 function subscribe() {
   if (channel) return;
   channel = sb.channel('nnn');
-  for (const t of ['profiles', 'banned', 'checkins', 'contests', 'votes'])
+  for (const t of ['profiles', 'banned', 'checkins', 'contests', 'votes', 'groups', 'group_members'])
     channel.on('postgres_changes', { event: '*', schema: 'public', table: t }, scheduleReload);
   // Messages, réactions et « vu » : mis à jour sur place, sans tout recharger.
   channel.on('postgres_changes', { event: '*', schema: 'public', table: 'posts' }, onPost);
   channel.on('postgres_changes', { event: '*', schema: 'public', table: 'reactions' }, onReaction);
-  channel.on('postgres_changes', { event: '*', schema: 'public', table: 'reads' }, e => { if (e.new?.user_id) { reads.set(e.new.user_id, +new Date(e.new.seen_at)); queue(); } });
+  channel.on('postgres_changes', { event: '*', schema: 'public', table: 'group_reads' }, e => { if (e.new?.user_id && e.new.group_id === gid) { reads.set(e.new.user_id, +new Date(e.new.seen_at)); queue(); } });
   channel.subscribe(st => { if (st === 'SUBSCRIBED' && loaded) scheduleReload(); });
-  // Présence (en ligne) et « … écrit ».
-  room = sb.channel('nnn-room', { config: { presence: { key: me } } });
+}
+// Présence (en ligne) et « … écrit » : un salon par groupe.
+let roomGid = null;
+function joinRoom() {
+  if (!sb || roomGid === gid) return;
+  if (room) { try { sb.removeChannel(room); } catch (_) {} room = null; online = new Set(); typing.clear(); }
+  roomGid = gid; if (!gid) return;
+  room = sb.channel('nnn-room-' + gid, { config: { presence: { key: me } } });
   room.on('presence', { event: 'sync' }, () => { online = new Set(Object.keys(room.presenceState())); queue(); });
   room.on('broadcast', { event: 'typing' }, ({ payload }) => {
     const id = payload?.id; if (!id || id === me || !online.has(id)) return;
@@ -752,6 +806,7 @@ function subscribe() {
 function onPost(e) {
   if (e.eventType === 'DELETE') { const id = e.old?.id; if (!id) return scheduleReload(); posts = posts.filter(p => p.id !== id); if (selected === id) selected = null; queue(); return; }
   const p = e.new; if (!p?.id) return scheduleReload();
+  if (p.group_id && p.group_id !== gid) { otherNews.add(p.group_id); queue(); return; }
   const i = posts.findIndex(x => x.id === p.id);
   if (i >= 0) posts[i] = { ...posts[i], ...p };
   else { posts.unshift(p); posts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)); }
@@ -763,6 +818,7 @@ function onPost(e) {
 }
 function onReaction(e) {
   const r = e.eventType === 'DELETE' ? e.old : e.new; if (!r?.post_id) return scheduleReload();
+  if (e.eventType !== 'DELETE' && !posts.some(p => p.id === r.post_id)) return;
   const rx = reactions.get(r.post_id) || {};
   if (e.eventType === 'DELETE') delete rx[r.user_id]; else rx[r.user_id] = r.emoji;
   reactions.set(r.post_id, rx); queue();
@@ -771,13 +827,17 @@ function onReaction(e) {
 /* ---------- actions ---------- */
 function friendly(e) {
   const m = (e && (e.message || e.error_description)) || '';
+  if (/NNN_BAD_INVITE/.test(m)) return 'Ce lien d\'invitation n\'est plus valable. Demande-en un nouveau.';
+  if (/NNN_GROUP_BANNED/.test(m)) return 'Tu as été retiré de ce groupe.';
+  if (/NNN_GROUP_FULL/.test(m)) return 'Ce groupe est complet (200 membres).';
+  if (/NNN_TOO_MANY_GROUPS/.test(m)) return 'Tu as déjà créé 5 groupes, c\'est le maximum.';
+  if (/NNN_FORBIDDEN/.test(m)) return 'Seuls les organisateurs du groupe peuvent faire ça.';
   if (/NNN_SLOW/.test(m)) return 'Doucement : 8 messages par minute maximum. Réessaie dans un instant.';
   if (/NNN_BAD_PATH/.test(m)) return 'Photo refusée.';
   if (/Payload too large|exceeded the maximum/i.test(m)) return 'Photo trop lourde.';
   if (/NNN_BANNED/.test(m)) return 'Tu as été retiré du défi par l\'organisateur.';
   if (/duplicate key.*pseudo|profiles_pseudo_unique/i.test(m)) return 'Ce pseudo est déjà pris.';
   if (/row-level security|violates/i.test(m)) return 'Action refusée : elle ne respecte pas les règles du défi.';
-  if (/duplicate key.*pseudo|profiles_pseudo_unique/i.test(m)) return 'Ce pseudo est déjà pris.';
   if (/duplicate key/i.test(m)) return 'C\'est déjà enregistré.';
   if (/Invalid login credentials/i.test(m)) return 'E-mail ou mot de passe incorrect.';
   if (/Email not confirmed/i.test(m)) return 'Confirme d\'abord ton e-mail avec le lien reçu.';
@@ -823,16 +883,16 @@ async function delPost(id) {
   if (await run(() => sb.from('posts').delete().eq('id', id), 'Message supprimé') && img) sb.storage.from('photos').remove([img]).then(() => {}, () => {});
 }
 async function contest(p) {
-  const ok = await run(() => sb.from('contests').insert({ target: p.author, day: p.day, opened_by: me }), 'Contestation ouverte. Le groupe vote.');
+  const ok = await run(() => sb.from('contests').insert({ target: p.author, day: p.day, opened_by: me, group_id: gid }), 'Contestation ouverte. Le groupe vote.');
   if (ok) run(() => sb.from('votes').insert({ target: p.author, day: p.day, voter: me, vote: 'invalid' }));
 }
 function vote(c, v) { run(() => sb.from('votes').upsert({ target: c.target, day: c.day, voter: me, vote: v }, { onConflict: 'target,day,voter' })); }
 function resolve(c, r) { run(() => sb.from('contests').update({ resolution: r }).eq('target', c.target).eq('day', c.day), r ? 'Décision enregistrée' : 'Rendu au vote'); }
 function removeMember(id) {
   if (!confirm(`Retirer ${nm(id)} du défi ? Son historique reste visible, mais il ne pourra plus valider, écrire ni voter. Tu pourras le réintégrer.`)) return;
-  run(() => sb.from('banned').insert({ user_id: id }), nm(id) + ' a été retiré du défi');
+  run(() => sb.rpc('ban_member', { g: gid, u: id }), nm(id) + ' a été retiré du groupe');
 }
-function reinstate(id) { run(() => sb.from('banned').delete().eq('user_id', id), nm(id) + ' est de retour dans le défi'); }
+function reinstate(id) { run(() => sb.rpc('unban_member', { g: gid, u: id }), nm(id) + ' peut revenir avec le lien d\'invitation'); }
 function joinClub(pseudo) { return sb.rpc('join_club', { p_pseudo: pseudo }); }
 function saved(k) { try { return localStorage.getItem(k) || ''; } catch (_) { return ''; } }
 function forget(...ks) { try { ks.forEach(k => localStorage.removeItem(k)); } catch (_) {} }
@@ -842,7 +902,7 @@ function banner(title, text) { const b = $('banner'); b.replaceChildren(h('b', {
 function setAuthMode(m) {
   authMode = m;
   $('tab-login').setAttribute('aria-selected', m === 'login'); $('tab-signup').setAttribute('aria-selected', m === 'signup');
-  $('f-pseudo').hidden = m !== 'signup';
+  $('f-pseudo').hidden = m !== 'signup'; $('f-terms').hidden = m !== 'signup';
   $('forgot-btn').hidden = m === 'signup';
   $('in-pass').autocomplete = m === 'signup' ? 'new-password' : 'current-password';
   $('auth-submit').textContent = m === 'signup' ? 'Créer mon compte' : 'Entrer';
@@ -856,6 +916,7 @@ $('auth-form').addEventListener('submit', async e => {
   const msg = $('auth-msg'); msg.className = 'form-msg'; msg.textContent = '';
   if (!email || password.length < 6) { msg.textContent = 'Indique ton e-mail et un mot de passe de 6 caractères minimum.'; return; }
   if (authMode === 'signup' && pseudo.length < 2) { msg.textContent = 'Choisis un pseudo de 2 caractères minimum.'; return; }
+  if (authMode === 'signup' && !$('in-terms').checked) { msg.textContent = 'Coche la case : le site est réservé aux 18 ans et plus.'; return; }
   $('auth-submit').disabled = true;
   try {
     if (authMode === 'login') {
@@ -863,7 +924,7 @@ $('auth-form').addEventListener('submit', async e => {
     } else {
       const { data, error } = await sb.auth.signUp({ email, password, options: { data: { pseudo }, emailRedirectTo: location.origin } });
       if (error) throw error;
-      try { localStorage.setItem('nnn-pseudo', pseudo); } catch (_) {}
+      try { localStorage.setItem('nnn-pseudo', pseudo); localStorage.setItem('nnn-terms', '1'); } catch (_) {}
       if (!data.session) { setAuthMode('login'); msg.className = 'form-msg ok'; msg.textContent = 'Compte créé. Ouvre le lien reçu par e-mail, puis connecte-toi ici.'; }
     }
   } catch (err) { msg.textContent = friendly(err); }
@@ -874,12 +935,13 @@ $('setup-form').addEventListener('submit', async e => {
   const pseudo = $('setup-pseudo').value.trim(), msg = $('setup-msg');
   msg.textContent = '';
   if (pseudo.length < 2) { msg.textContent = 'Choisis un pseudo de 2 caractères minimum.'; return; }
+  if (!$('setup-terms').checked) { msg.textContent = 'Coche la case : le site est réservé aux 18 ans et plus.'; return; }
   $('setup-submit').disabled = true;
   const { error } = await joinClub(pseudo);
   $('setup-submit').disabled = false;
   if (error) { msg.textContent = friendly(error); return; }
   forget('nnn-pseudo');
-  await loadAll(); toast('Bienvenue sur le mur, ' + pseudo);
+  await loadAll(); toast('Bienvenue, ' + pseudo); await afterJoin();
 });
 $('composer').addEventListener('input', composerChanged);
 $('composer').addEventListener('click', renderMentions);
@@ -909,6 +971,169 @@ $('rename-btn').onclick = async () => {
   if (next.length < 2 || next.length > 24) { toast('Le pseudo doit faire entre 2 et 24 caractères.'); return; }
   run(() => sb.from('profiles').update({ pseudo: next }).eq('id', me), 'Pseudo changé : ' + next);
 };
+/* ---------- groupes ---------- */
+let boardMode = saved('nnn-board') || 'group';
+$('bm-group').onclick = () => { boardMode = 'group'; try { localStorage.setItem('nnn-board', 'group'); } catch (_) {} queue(); };
+$('bm-global').onclick = () => { boardMode = 'global'; try { localStorage.setItem('nnn-board', 'global'); } catch (_) {} queue(); };
+function inviteUrl(g) { return location.origin + '/?invite=' + g.invite_code; }
+async function shareInvite() {
+  const g = grp(); if (!g) return;
+  const url = inviteUrl(g), text = `Rejoins « ${g.name} » sur NNN club : on tient le mur ensemble en novembre.`;
+  if (navigator.share) { try { await navigator.share({ title: 'NNN club', text, url }); return; } catch (e) { if (e.name === 'AbortError') return; } }
+  try { await navigator.clipboard.writeText(url); toast('Lien d\'invitation copié'); } catch (_) { prompt('Copie ce lien et envoie-le :', url); }
+}
+function renderGroupBars() {
+  const g = grp(), n = members().length, news = otherNews.size;
+  const bar = () => g ? [
+    h('button', { type: 'button', class: 'gname-btn', 'aria-label': 'Changer de groupe', onclick: () => openSheet({ type: 'groups' }) },
+      h('b', { text: g.name }), h('span', { class: 'dim', text: `${n} membre${n > 1 ? 's' : ''}` }), news ? h('i', { class: 'gdot', title: 'Nouveaux messages dans un autre groupe' }) : null, h('span', { class: 'chev', 'aria-hidden': 'true', text: '▾' })),
+    h('button', { type: 'button', class: 'btn invite', onclick: shareInvite, text: 'Inviter' }),
+    h('button', { type: 'button', class: 'gear', 'aria-label': 'Réglages du groupe', onclick: () => openSheet({ type: 'gsettings' }) }, '⚙')] : [];
+  $('groupbar-feed').replaceChildren(...bar()); $('groupbar-board').replaceChildren(...bar());
+  $('nogroup-feed').hidden = !!gid; if (!gid) $('nogroup-feed').replaceChildren(...noGroupPanel());
+  document.querySelector('#v-feed .chat-top').hidden = $('feed').hidden = $('composer-form').hidden = !gid;
+}
+// Pas encore de groupe : en créer un ou en rejoindre un.
+function noGroupPanel() {
+  const name = h('input', { type: 'text', maxlength: '40', placeholder: 'Ex. Les moines de novembre', 'aria-label': 'Nom du groupe' });
+  const code = h('input', { type: 'text', maxlength: '120', placeholder: 'Lien ou code d\'invitation', 'aria-label': 'Lien ou code d\'invitation' });
+  return [h('p', { class: 'kicker', text: 'Ton groupe' }), h('h2', { class: 'h2', text: 'Le défi se vit à plusieurs' }),
+    h('p', { class: 'dim', text: 'Crée un groupe et invite tes amis, ou rejoins le leur avec le lien qu\'ils t\'ont envoyé. En attendant, tu apparais au classement de tous les participants.' }),
+    h('form', { class: 'stack-s', onsubmit: e => { e.preventDefault(); createGroup(name.value); } }, h('label', { class: 'field' }, h('span', { text: 'Créer un groupe' }), name), h('button', { class: 'btn', type: 'submit', text: 'Créer le groupe' })),
+    h('form', { class: 'stack-s', onsubmit: e => { e.preventDefault(); joinByCode(code.value); } }, h('label', { class: 'field' }, h('span', { text: 'Rejoindre un groupe' }), code), h('button', { class: 'btn ghost', type: 'submit', text: 'Rejoindre' }))];
+}
+function codeFrom(v) { v = (v || '').trim(); const m = /invite=([a-z0-9]+)/i.exec(v); return (m ? m[1] : v).toLowerCase().replace(/[^a-z0-9]/g, ''); }
+async function switchGroup(id) {
+  if (!myGroups.has(id) || id === gid) { closeSheet(); return; }
+  gid = id; otherNews.delete(id); try { localStorage.setItem('nnn-group', id); } catch (_) {}
+  posts = []; reactions = new Map(); reads = new Map(); gmembers = new Map(); selected = null; replyTo = null; editing = null; unreadMark = null; postLimit = 100;
+  closeSheet(); stick = 'bottom'; loaded = false; queue(); await loadAll();
+}
+async function createGroup(name) {
+  name = (name || '').trim();
+  if (name.length < 2) { toast('Donne un nom de 2 caractères minimum à ton groupe.'); return; }
+  let id = null;
+  const ok = await run(async () => { const r = await sb.rpc('create_group', { p_name: name.slice(0, 40) }); id = r.data; return r; }, null, false);
+  if (ok && id) { await loadAll(); await switchGroup(id); location.hash = 'feed'; goTab('feed'); toast('Groupe créé. Invite tes amis avec le bouton « Inviter ».'); }
+}
+async function joinByCode(v) {
+  const code = codeFrom(v); if (!code) { toast('Colle le lien ou le code reçu.'); return; }
+  let id = null;
+  const ok = await run(async () => { const r = await sb.rpc('join_group', { p_code: code }); id = r.data; return r; }, null, false);
+  if (ok && id) { await loadAll(); await switchGroup(id); location.hash = 'feed'; goTab('feed'); toast('Bienvenue dans « ' + (grp()?.name || 'le groupe') + ' »'); }
+}
+// Lien d'invitation : ?invite=code (gardé jusqu'à la connexion). ?g=id : ouvrir ce groupe (notifications).
+(function readLinks() {
+  const u = new URL(location.href), inv = u.searchParams.get('invite'), g = u.searchParams.get('g');
+  if (inv) try { localStorage.setItem('nnn-invite', codeFrom(inv)); } catch (_) {}
+  if (g) try { localStorage.setItem('nnn-group', g); } catch (_) {}
+  if (inv || g) { u.searchParams.delete('invite'); u.searchParams.delete('g'); history.replaceState(null, '', u.pathname + u.search + u.hash); }
+})();
+async function loadInvitePreview() {
+  const code = saved('nnn-invite'); if (!code || !sb) return;
+  const { data } = await sb.rpc('group_preview', { p_code: code });
+  const g = Array.isArray(data) ? data[0] : data;
+  pendingInvite = g ? { code, name: g.name, members: g.members } : null;
+  if (!g) forget('nnn-invite');
+  queue();
+}
+async function afterJoin() {
+  const code = saved('nnn-invite'); if (!code || !profiles.has(me)) return;
+  forget('nnn-invite'); pendingInvite = null;
+  await joinByCode(code);
+}
+let pubStats = null;
+async function renderLanding() {
+  const ic = $('invite-card');
+  ic.hidden = !pendingInvite;
+  if (pendingInvite) ic.replaceChildren(h('p', { class: 'kicker', text: 'Invitation' }),
+    h('p', {}, 'Tu es invité à rejoindre ', h('b', { text: '« ' + pendingInvite.name + ' »' }), ` (${pendingInvite.members} membre${pendingInvite.members > 1 ? 's' : ''}). Crée ton compte ou connecte-toi : tu y entreras directement.`));
+  const ps = $('pub-stats');
+  if (pubStats) {
+    ps.hidden = false;
+    ps.replaceChildren(...[[pubStats.participants, 'participants'], [pubStats.groups, 'groupes'], [pubStats.held_today, 'ont tenu aujourd\'hui']].map(([v, l]) => h('div', {}, h('b', { text: v }), h('span', { text: l }))));
+  }
+}
+async function loadPublicStats() { if (!sb) return; const { data } = await sb.rpc('public_stats'); if (data) { pubStats = data; queue(); } }
+
+function renderGroupsSheet() {
+  const d = $('sheet');
+  const list = [...myGroups.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const name = h('input', { type: 'text', maxlength: '40', placeholder: 'Nom du nouveau groupe', 'aria-label': 'Nom du nouveau groupe' });
+  const code = h('input', { type: 'text', maxlength: '120', placeholder: 'Lien ou code d\'invitation', 'aria-label': 'Lien ou code d\'invitation' });
+  d.replaceChildren(sheetHead('Mes groupes'),
+    list.length ? h('div', { class: 'glist2' }, list.map(g => h('button', { type: 'button', class: 'opt' + (g.id === gid ? ' cur' : ''), 'aria-pressed': g.id === gid ? 'true' : 'false', onclick: () => switchGroup(g.id) },
+      h('b', {}, g.name, otherNews.has(g.id) ? h('i', { class: 'gdot' }) : null), h('span', { text: { owner: 'Propriétaire', admin: 'Organisateur', member: 'Membre' }[g.role] })))) : h('p', { class: 'dim', text: 'Tu n\'as pas encore de groupe.' }),
+    h('form', { class: 'row-form', onsubmit: e => { e.preventDefault(); closeSheet(); createGroup(name.value); } }, name, h('button', { class: 'btn', type: 'submit', text: 'Créer' })),
+    h('form', { class: 'row-form', onsubmit: e => { e.preventDefault(); closeSheet(); joinByCode(code.value); } }, code, h('button', { class: 'btn ghost', type: 'submit', text: 'Rejoindre' })));
+}
+function renderGroupSettings() {
+  const d = $('sheet'), g = grp(); if (!g) { closeSheet(); return; }
+  const isOwner = g.owner === me, ga = gadmin();
+  const kids = [sheetHead('Réglages du groupe')];
+  if (ga) {
+    const inp = h('input', { type: 'text', maxlength: '40', 'aria-label': 'Nom du groupe' }); inp.value = g.name;
+    kids.push(h('form', { class: 'row-form', onsubmit: e => { e.preventDefault(); const v = inp.value.trim(); if (v.length >= 2 && v !== g.name) run(() => sb.from('groups').update({ name: v }).eq('id', g.id), 'Groupe renommé'); } }, inp, h('button', { class: 'btn ghost', type: 'submit', text: 'Renommer' })));
+  } else kids.push(h('p', {}, h('b', { text: g.name })));
+  kids.push(h('div', { class: 'stack-s' }, h('p', { class: 'kicker', text: 'Invitation' }), h('code', { class: 'invite-url', text: inviteUrl(g) }),
+    h('div', { class: 'btn-row' }, h('button', { class: 'btn', type: 'button', onclick: shareInvite, text: 'Partager le lien' }),
+      ga ? h('button', { class: 'btn ghost', type: 'button', onclick: () => { if (confirm('Créer un nouveau lien ? L\'ancien ne marchera plus.')) run(async () => { const r = await sb.rpc('regen_invite', { g: g.id }); return r; }, 'Nouveau lien créé').then(() => renderSheet()); }, text: 'Nouveau lien' }) : null)));
+  // Signalements du groupe
+  if (ga) {
+    const rs = groupReports();
+    if (rs.length) kids.push(h('div', { class: 'stack-s' }, h('p', { class: 'kicker', text: 'Messages signalés' }), rs.map(reportRow)));
+  }
+  const ms = members().sort((a, b) => ({ owner: 0, admin: 1, member: 2 }[gmembers.get(a).role] - { owner: 0, admin: 1, member: 2 }[gmembers.get(b).role]) || nm(a).localeCompare(nm(b)));
+  kids.push(h('div', { class: 'stack-s' }, h('p', { class: 'kicker', text: `Membres (${ms.length})` }), h('div', { class: 'mlist' }, ms.map(id => {
+    const r = gmembers.get(id).role;
+    return h('div', { class: 'mrow' }, avatar(id, 'sm', true), h('span', { class: 'mname' }, nm(id), r !== 'member' ? h('span', { class: 'badge ice', text: r === 'owner' ? 'Propriétaire' : 'Organisateur' }) : null),
+      isOwner && id !== me ? h('button', { class: 'linkbtn ok', type: 'button', onclick: () => run(() => sb.rpc('set_member_role', { g: g.id, u: id, r: r === 'admin' ? 'member' : 'admin' }), r === 'admin' ? 'Organisateur retiré' : nm(id) + ' est organisateur').then(() => renderSheet()), text: r === 'admin' ? 'Retirer organisateur' : 'Nommer organisateur' }) : null,
+      ga && id !== me && r !== 'owner' ? h('button', { class: 'linkbtn', type: 'button', onclick: () => { removeMember(id); setTimeout(renderSheet, 600); }, text: 'Retirer' }) : null);
+  }))));
+  const out = [...gbans].filter(id => profiles.has(id));
+  if (ga && out.length) kids.push(h('div', { class: 'stack-s' }, h('p', { class: 'kicker', text: 'Retirés du groupe' }), out.map(id => h('div', { class: 'mrow' }, avatar(id, 'sm'), h('span', { class: 'mname', text: nm(id) }),
+    h('button', { class: 'linkbtn ok', type: 'button', onclick: () => { reinstate(id); setTimeout(renderSheet, 600); }, text: 'Autoriser à revenir' })))));
+  kids.push(h('button', { class: 'btn ghost danger-t', type: 'button', onclick: leaveGroup, text: 'Quitter le groupe' }));
+  d.replaceChildren(...kids);
+}
+async function leaveGroup() {
+  const g = grp(); if (!g) return;
+  const alone = members().length <= 1;
+  if (!confirm(alone ? `Tu es seul dans « ${g.name} ». Le quitter le supprime définitivement, avec ses messages. Continuer ?` : `Quitter « ${g.name} » ? Tu pourras revenir avec un lien d'invitation.` + (g.owner === me ? ' La propriété passera à un autre organisateur ou au plus ancien membre.' : ''))) return;
+  if (await run(() => sb.rpc('leave_group', { g: g.id }), 'Tu as quitté le groupe', false)) { closeSheet(); gid = null; forget('nnn-group'); await loadAll(); }
+}
+
+/* ---------- signalements et modération ---------- */
+async function reportPost(p) {
+  const reason = prompt('Pourquoi signales-tu ce message ? (facultatif)\nLes organisateurs du groupe seront prévenus.', '');
+  if (reason === null) return;
+  run(() => sb.from('reports').insert({ post_id: p.id, reporter: me, reason: reason.trim().slice(0, 300) || null }), 'Merci, le message est signalé aux organisateurs.', false);
+}
+function groupReports() { const byPost = new Map(); reports.forEach(r => { const p = posts.find(x => x.id === r.post_id); if (p) (byPost.get(r.post_id) || byPost.set(r.post_id, { p, rs: [] }).get(r.post_id)).rs.push(r); }); return [...byPost.values()]; }
+function reportRow({ p, rs }) {
+  return h('div', { class: 'report' }, h('div', {}, h('b', { text: nm(p.author) }), ' : ', snippet(p)),
+    h('span', { class: 'dim', text: `${rs.length} signalement${rs.length > 1 ? 's' : ''}` + (rs.some(r => r.reason) ? ' · « ' + rs.filter(r => r.reason).map(r => r.reason).join(' » « ') + ' »' : '') }),
+    h('div', { class: 'btn-row' },
+      h('button', { class: 'btn danger', type: 'button', onclick: async () => { if (await run(() => sb.from('posts').delete().eq('id', p.id), 'Message supprimé')) renderSheet(); }, text: 'Supprimer le message' }),
+      h('button', { class: 'btn ghost', type: 'button', onclick: async () => { if (await run(() => sb.from('reports').delete().eq('post_id', p.id), 'Signalement classé')) renderSheet(); }, text: 'Garder' }),
+      admin && p.author !== me ? h('button', { class: 'btn ghost', type: 'button', onclick: async () => { if (confirm(`Suspendre le compte de ${nm(p.author)} sur tout le site ?`) && await run(() => sb.from('banned').insert({ user_id: p.author }), 'Compte suspendu')) renderSheet(); }, text: 'Suspendre l\'auteur' }) : null));
+}
+// Modération du site : tous les signalements, tous groupes confondus.
+async function renderModSheet() {
+  const d = $('sheet'), ids = [...new Set(reports.map(r => r.post_id))];
+  const { data } = ids.length ? await sb.from('posts').select('*').in('id', ids) : { data: [] };
+  if (sheetView?.type !== 'mod') return;
+  const rows = (data || []).map(p => ({ p, rs: reports.filter(r => r.post_id === p.id) }));
+  d.replaceChildren(sheetHead('Modération'), rows.length ? h('div', { class: 'stack-s' }, rows.map(reportRow)) : h('p', { class: 'dim', text: 'Aucun message signalé.' }));
+}
+$('groups-btn').onclick = () => { $('me-menu').hidden = true; openSheet({ type: 'groups' }); };
+$('mod-btn').onclick = () => { $('me-menu').hidden = true; openSheet({ type: 'mod' }); };
+async function deleteAccount() {
+  const w = prompt('Supprimer ton compte efface définitivement ton profil, tes jours, tes messages et tes votes.\nÉcris SUPPRIMER pour confirmer :', '');
+  if ((w || '').trim().toUpperCase() !== 'SUPPRIMER') return;
+  if (await run(() => sb.rpc('delete_my_account'), null, false)) { closeSheet(); forget('nnn-group', 'nnn-seen', 'nnn-draft'); await sb.auth.signOut(); toast('Ton compte a été supprimé.'); }
+}
+
 /* ---------- fiche membre ---------- */
 let sheetView = null;
 const sinceFmt = new Intl.DateTimeFormat('fr-FR', { timeZone: TZ, day: 'numeric', month: 'long' });
@@ -920,12 +1145,15 @@ function sheetHead(title) { return h('div', { class: 'sheet-head' }, h('h2', { c
 function renderSheet() {
   const d = $('sheet'); if (!sheetView) return;
   if (sheetView.type === 'notif') return renderNotifSheet();
+  if (sheetView.type === 'groups') return renderGroupsSheet();
+  if (sheetView.type === 'gsettings') return renderGroupSettings();
+  if (sheetView.type === 'mod') return renderModSheet();
   const id = sheetView.id, pr = profiles.get(id); if (!pr) { closeSheet(); return; }
   const st = stat(id), isMe = id === me;
   const kids = [sheetHead(isMe ? 'Mon profil' : 'Profil'),
     h('div', { class: 'prof' }, avatar(id, 'xxl'), h('div', { class: 'prof-id' }, h('b', { text: pr.pseudo }),
       h('span', { class: 'dim', text: 'Sur le mur depuis le ' + sinceFmt.format(new Date(pr.created_at)) + (online.has(id) && !isMe ? ' · en ligne' : '') }),
-      h('div', { class: 'badges' }, banned.has(id) ? h('span', { class: 'badge bad', text: 'Retiré du défi' }) : badges(st)))),
+      h('div', { class: 'badges' }, banned.has(id) ? h('span', { class: 'badge bad', text: 'Compte suspendu' }) : badges(st)))),
     h('div', { class: 'stats' }, [['Série en cours', st.cur], ['Jours tenus', st.ok], ['Meilleure série', st.best]].map(([l, v]) => h('div', { class: 'stat' }, h('b', { text: v }), h('span', { text: l })))),
     h('div', { class: 'wall' }, wall(st.cells))];
   if (isMe) {
@@ -933,8 +1161,9 @@ function renderSheet() {
     kids.push(h('div', { class: 'btn-row' },
       h('label', { class: 'btn' }, inp, pr.avatar ? 'Changer la photo' : 'Ajouter une photo'),
       pr.avatar ? h('button', { type: 'button', class: 'btn ghost', onclick: () => setAvatar(null), text: 'Retirer la photo' }) : null,
-      h('button', { type: 'button', class: 'btn ghost', onclick: () => { closeSheet(); $('rename-btn').click(); }, text: 'Changer de pseudo' })));
-  } else if (!banned.has(id)) {
+      h('button', { type: 'button', class: 'btn ghost', onclick: () => { closeSheet(); $('rename-btn').click(); }, text: 'Changer de pseudo' })),
+      h('button', { type: 'button', class: 'textbtn danger-t', onclick: deleteAccount, text: 'Supprimer mon compte' }));
+  } else if (!banned.has(id) && gmembers.has(id)) {
     kids.push(h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn', onclick: () => {
       closeSheet(); if (tab !== 'feed') { location.hash = 'feed'; goTab('feed'); }
       const c = $('composer'); c.value = (c.value ? c.value.replace(/\s*$/, ' ') : '') + '@' + pr.pseudo + ' '; composerChanged(); c.focus();
@@ -1008,7 +1237,7 @@ function renderNotifCta(hasProfile) {
   const later = +(saved('nnn-notif-later') || 0);
   $('notif-cta').hidden = !(hasProfile && tab === 'today' && pushSupported() && Notification.permission === 'default' && Date.now() - later > 3 * 864e5);
 }
-if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { const go = e.data?.go; if (go && ['today', 'board', 'feed'].includes(go)) { location.hash = go; } });
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { const go = e.data?.go, g = e.data?.g; if (g && g !== gid && myGroups.has(g)) switchGroup(g); if (go && ['today', 'board', 'feed'].includes(go)) { location.hash = go; } });
 
 // Photos dans la discussion
 $('photo-in').addEventListener('change', e => { pickPhoto(e.target.files[0]); e.target.value = ''; });
@@ -1058,7 +1287,7 @@ $('reset-form').addEventListener('submit', async e => {
 /* ---------- démarrage ---------- */
 async function onSession(sess) {
   session = sess; me = sess?.user?.id || null; admin = false; loaded = false;
-  if (!sess) { profiles = new Map(); banned = new Set(); recovery = false; queue(); return; }
+  if (!sess) { profiles = new Map(); banned = new Set(); myGroups = new Map(); gid = null; otherNews.clear(); recovery = false; joinRoom(); queue(); loadInvitePreview(); loadPublicStats(); return; }
   const pre = saved('nnn-pseudo') || sess.user.user_metadata?.pseudo || '';
   $('setup-pseudo').value = pre; $('setup-msg').textContent = '';
   const { data } = await sb.rpc('is_admin'); admin = !!data;
@@ -1070,6 +1299,7 @@ async function onSession(sess) {
     else { $('setup-msg').textContent = friendly(error); queue(); }
   }
   subscribe();
+  if (profiles.has(me)) afterJoin();
 }
 fromHash(); setAuthMode('login');
 if (!sb) {

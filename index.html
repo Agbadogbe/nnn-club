@@ -5,7 +5,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#121417">
 <title>Club No Nut November</title>
-<meta name="description" content="Le mur du groupe pour tenir les 30 jours de novembre.">
+<meta name="description" content="Le défi No Nut November entre amis : crée ton groupe, trace un bâton par jour tenu, et grimpe au classement. Gratuit, 18 ans et plus.">
+<meta property="og:title" content="NNN club · Tiens le mur">
+<meta property="og:description" content="Le défi de novembre entre amis : un bâton par jour tenu, le groupe pour témoin.">
+<meta property="og:image" content="https://nnn-club.vercel.app/icons/icon-512.png">
+<meta property="og:type" content="website">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23121417'/%3E%3Cg stroke='%23eceae4' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M8 7v18M13 7v18M18 7v18M23 7v18'/%3E%3Cpath d='M5 22L27 10' stroke='%238fd3ff'/%3E%3C/g%3E%3C/svg%3E">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -32,6 +36,8 @@
     <div class="menu" id="me-menu" hidden>
       <div class="menu-name" id="me-name"></div>
       <button class="plain" id="profile-btn">Mon profil</button>
+      <button class="plain" id="groups-btn">Mes groupes</button>
+      <button class="plain" id="mod-btn" hidden>Modération</button>
       <button class="plain" id="notif-btn">Notifications</button>
       <button class="plain" id="rename-btn">Changer de pseudo</button>
       <button class="plain" id="install-btn" hidden>Installer l'appli</button>
@@ -54,6 +60,8 @@
         <p class="poster-sub">Chaque jour tenu, un bâton de plus sur le mur du groupe. Un serment par jour, le groupe pour témoin.</p>
         <div class="poster-wall" aria-hidden="true" id="poster-wall"></div>
       </div>
+      <div class="invite-card panel" id="invite-card" hidden></div>
+      <div class="pub-stats" id="pub-stats" hidden></div>
       <form class="panel auth" id="auth-form" novalidate>
         <div class="seg" role="tablist">
           <button type="button" role="tab" id="tab-login" aria-selected="true">Connexion</button>
@@ -62,10 +70,21 @@
         <label class="field" id="f-pseudo" hidden><span>Pseudo</span><input id="in-pseudo" type="text" maxlength="24" autocomplete="nickname" placeholder="Comment le groupe t'appelle"></label>
         <label class="field"><span>E-mail</span><input id="in-email" type="email" autocomplete="email" required placeholder="toi@exemple.com"></label>
         <label class="field"><span>Mot de passe</span><input id="in-pass" type="password" autocomplete="current-password" minlength="6" required placeholder="6 caractères minimum"></label>
+        <label class="check" id="f-terms" hidden><input type="checkbox" id="in-terms"><span>J'ai 18 ans ou plus et j'accepte les <a href="conditions.html" target="_blank">conditions d'utilisation</a> et la <a href="confidentialite.html" target="_blank">politique de confidentialité</a>.</span></label>
         <p class="form-msg" id="auth-msg" role="status"></p>
         <button class="btn big" type="submit" id="auth-submit">Entrer</button>
         <button class="textbtn" type="button" id="forgot-btn">Mot de passe oublié ?</button>
       </form>
+      <section class="how stack-s" aria-labelledby="how-title">
+        <h2 class="h2" id="how-title">Comment ça marche</h2>
+        <ol class="steps">
+          <li><b>Crée ton groupe</b> ou rejoins celui de tes amis avec leur lien d'invitation.</li>
+          <li><b>Chaque jour de novembre</b>, prête serment et trace ton bâton. Tu as craqué ? Tu le dis, c'est la règle.</li>
+          <li><b>Le groupe veille</b> : discussion, réactions, et vote si un jour paraît douteux.</li>
+          <li><b>Grimpe au classement</b> de ton groupe et au classement de tous les participants.</li>
+        </ol>
+        <p class="dim">Gratuit, sans publicité. Réservé aux 18 ans et plus. Tes messages ne sont lus que par les membres de tes groupes.</p>
+      </section>
     </section>
 
     <!-- ===== Choix du pseudo ===== -->
@@ -73,7 +92,8 @@
       <form class="panel stack-s" id="setup-form">
         <p class="kicker">Dernière étape</p>
         <h2 class="h2">Ton nom sur le mur</h2>
-        <p class="dim">C'est le pseudo que verront les autres membres dans le classement et le fil.</p>
+        <p class="dim">C'est le pseudo que verront les autres dans les classements et les discussions.</p>
+        <label class="check"><input type="checkbox" id="setup-terms"><span>J'ai 18 ans ou plus et j'accepte les <a href="conditions.html" target="_blank">conditions</a> et la <a href="confidentialite.html" target="_blank">confidentialité</a>.</span></label>
         <label class="field"><span>Pseudo</span><input id="setup-pseudo" type="text" maxlength="24" required></label>
         <p class="form-msg" id="setup-msg" role="status"></p>
         <button class="btn big" type="submit" id="setup-submit">Rejoindre le défi</button>
@@ -95,8 +115,8 @@
     <section id="v-banned" class="stack" hidden>
       <div class="panel stack-s">
         <p class="kicker">Accès retiré</p>
-        <h2 class="h2">Tu as été retiré du défi</h2>
-        <p class="dim">L'organisateur t'a retiré du groupe. Si c'est une erreur, contacte-le : il peut te réintégrer.</p>
+        <h2 class="h2">Compte suspendu</h2>
+        <p class="dim">La modération a suspendu ton compte pour non-respect des conditions d'utilisation. Si c'est une erreur, écris-nous à l'adresse indiquée dans les <a href="mentions-legales.html">mentions légales</a>.</p>
       </div>
     </section>
 
@@ -120,9 +140,15 @@
     <!-- ===== Classement ===== -->
     <section id="v-board" class="stack" hidden>
       <div class="row-between"><h2 class="h2 xl">Le classement</h2><span class="tag" id="lb-sum"></span></div>
+      <div class="seg" role="tablist" aria-label="Classement">
+        <button type="button" role="tab" id="bm-group" aria-selected="true">Mon groupe</button>
+        <button type="button" role="tab" id="bm-global" aria-selected="false">Tout le monde</button>
+      </div>
+      <div class="groupbar" id="groupbar-board"></div>
+      <div class="nogroup panel stack-s" id="nogroup-board" hidden></div>
       <div class="podium" id="podium"></div>
       <div class="panel lb" id="lb"></div>
-      <div class="panel stack-s">
+      <div class="panel stack-s" id="grid-panel">
         <h2 class="h2">Le mur du groupe</h2>
         <p class="dim">Une ligne par membre, une case par jour de novembre.</p>
         <div class="grid-wrap"><table class="grid" id="grid"></table></div>
@@ -136,7 +162,9 @@
 
     <!-- ===== Groupe ===== -->
     <section id="v-feed" class="chat-view" hidden>
+      <div class="nogroup panel stack-s" id="nogroup-feed" hidden></div>
       <div class="chat-top">
+        <div class="groupbar" id="groupbar-feed"></div>
         <div class="chips" id="feed-filters" role="group" aria-label="Filtrer la discussion"></div>
         <button class="pinbar" type="button" id="pinbar" hidden></button>
         <div class="presence" id="presence" aria-live="polite"></div>
@@ -157,6 +185,10 @@
     </section>
   </div>
 </main>
+
+<footer class="site-foot" id="site-foot">
+  <div class="wrap"><a href="conditions.html">Conditions</a><a href="confidentialite.html">Confidentialité</a><a href="mentions-legales.html">Mentions légales</a></div>
+</footer>
 
 <nav class="tabs" id="tabs" aria-label="Sections" hidden>
   <div class="wrap tabs-in">

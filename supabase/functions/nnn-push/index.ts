@@ -33,26 +33,38 @@ Deno.serve(async (req) => {
   const nm = (id: string) => (profiles || []).find((p) => p.id === id)?.pseudo || 'Quelqu\'un';
   const msgs = new Map<string, Msg>();
 
-  if (ev.type === 'post' && ev.id) {
+  if ((ev.type === 'post' || ev.type === 'report') && ev.id) {
     const { data: p } = await sb.from('posts').select('*').eq('id', ev.id).maybeSingle();
     if (!p) return json({ sent: 0 });
+    // Destinataires : les membres du groupe du message.
+    const [{ data: gm }, { data: grp }] = await Promise.all([
+      sb.from('group_members').select('user_id,role').eq('group_id', p.group_id),
+      sb.from('groups').select('name').eq('id', p.group_id).maybeSingle(),
+    ]);
+    const inGroup = new Map((gm || []).map((m) => [m.user_id, m.role]));
+    const gname = grp?.name || 'Le groupe';
+    const url = '/?g=' + p.group_id + '#feed';
+    const members2 = members.filter((m) => inGroup.has(m.id));
+    if (ev.type === 'report') {
+      for (const m of members2) if (inGroup.get(m.id) !== 'member') msgs.set(m.id, { title: `🚩 Message signalé · ${gname}`, body: `Un message de ${nm(p.author)} a été signalé. Ouvre la discussion pour décider.`, important: true, url, tag: 'report' });
+    } else
     if (p.kind === 'contest') {
-      for (const m of members) {
+      for (const m of members2) {
         if (m.id === p.author) continue;
         msgs.set(m.id, m.id === p.target
-          ? { title: `⚖️ Ton jour ${p.day} est contesté`, body: `${nm(p.author)} conteste ton jour ${p.day}. Défends-toi dans la discussion.`, important: true }
-          : { title: '⚖️ Contestation', body: `${nm(p.author)} conteste le jour ${p.day} de ${nm(p.target)}. Tu as 24 h pour voter.`, important: true });
+          ? { title: `⚖️ Ton jour ${p.day} est contesté`, body: `${nm(p.author)} conteste ton jour ${p.day} dans ${gname}. Défends-toi dans la discussion.`, important: true, url }
+          : { title: `⚖️ Contestation · ${gname}`, body: `${nm(p.author)} conteste le jour ${p.day} de ${nm(p.target)}. Tu as 24 h pour voter.`, important: true, url });
       }
     } else if (p.kind === 'text') {
       const text: string = p.text || '';
       const body = (text || '📷 Photo').slice(0, 180);
       let parent: { author: string } | null = null;
       if (p.reply_to) parent = (await sb.from('posts').select('author').eq('id', p.reply_to).maybeSingle()).data;
-      for (const m of members) {
+      for (const m of members2) {
         if (m.id === p.author) continue;
-        if (new RegExp('@' + esc(m.pseudo) + '(?![\\p{L}\\p{N}_])', 'iu').test(text)) msgs.set(m.id, { title: `${nm(p.author)} t'a mentionné`, body, important: true });
-        else if (parent && parent.author === m.id) msgs.set(m.id, { title: `${nm(p.author)} t'a répondu`, body, important: true });
-        else msgs.set(m.id, { title: `${nm(p.author)} · Le groupe`, body, important: false });
+        if (new RegExp('@' + esc(m.pseudo) + '(?![\\p{L}\\p{N}_])', 'iu').test(text)) msgs.set(m.id, { title: `${nm(p.author)} t'a mentionné · ${gname}`, body, important: true, url });
+        else if (parent && parent.author === m.id) msgs.set(m.id, { title: `${nm(p.author)} t'a répondu · ${gname}`, body, important: true, url });
+        else msgs.set(m.id, { title: `${nm(p.author)} · ${gname}`, body, important: false, url });
       }
     }
   } else if (ev.type === 'remind') {
